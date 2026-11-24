@@ -1,0 +1,5643 @@
+This file is a merged representation of a subset of the codebase, containing files not matching ignore patterns, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching these patterns are excluded: backups/**, repomix-p00-baseline.xml
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+backend/
+  app/
+    agents/
+      __init__.py
+      engagement_agent.py
+      fit_sla_agent.py
+      lead_intake_agent.py
+      lead_priority_agent.py
+      recency_agent.py
+    api/
+      routes/
+        leads.py
+      __init__.py
+    data/
+      __init__.py
+      seed_leads.py
+    models/
+      __init__.py
+      agent_outputs.py
+      api.py
+      audit.py
+      lead.py
+      workflow.py
+    rules/
+      __init__.py
+    services/
+      __init__.py
+      audit_service.py
+      context_builder.py
+      explanation_service.py
+      gemini_explainer.py
+      llm_config.py
+      workflow_graph.py
+      workflow_service.py
+      workflow_state.py
+    __init__.py
+    main.py
+  tests/
+    __init__.py
+    test_gemini_explainer.py
+    test_workflow.py
+  .dockerignore
+  .env.example
+  .gitignore
+  Dockerfile
+  requirements.txt
+docs/
+  architecture.md
+frontend/
+  public/
+    favicon.svg
+    icons.svg
+  src/
+    assets/
+      hero.png
+      react.svg
+      vite.svg
+    App.css
+    App.tsx
+    index.css
+    main.tsx
+  .dockerignore
+  .gitignore
+  Dockerfile
+  eslint.config.js
+  index.html
+  nginx.conf
+  package.json
+  README.md
+  tsconfig.app.json
+  tsconfig.json
+  tsconfig.node.json
+  vite.config.ts
+.dockerignore
+.gitignore
+.repomixignore
+docker-compose.yml
+README.md
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="backend/app/agents/__init__.py">
+
+</file>
+
+<file path="backend/app/agents/engagement_agent.py">
+from app.models.agent_outputs import EngagementOutput
+from app.models.workflow import WorkflowContext
+
+
+class EngagementAgent:
+
+    # Provisional MVP weights, not prescribed Product Bible values.
+    EVENT_WEIGHTS = {
+        "inquiry": 15,
+        "email_response": 10,
+        "meeting_attended": 20,
+        "follow_up_response": 10,
+    }
+
+    @classmethod
+    def run(cls, context: WorkflowContext) -> EngagementOutput:
+        total_score = 0
+        recognized_events = []
+
+        for event in context.engagement_events:
+            event_type = event.event_type.strip().lower()
+
+            if event_type in cls.EVENT_WEIGHTS:
+                total_score += cls.EVENT_WEIGHTS[event_type]
+                recognized_events.append(event_type)
+
+        result = EngagementOutput(
+            score=min(total_score, 40),
+            event_count=len(recognized_events),
+            recognized_events=recognized_events,
+            reason=(
+                f"{len(recognized_events)} recognized engagement "
+                f"events contributed to the score."
+            ),
+        )
+
+        context.engagement_score = result.score
+        context.agent_outputs["engagement"] = result.model_dump()
+
+        return result
+</file>
+
+<file path="backend/app/agents/fit_sla_agent.py">
+from datetime import datetime, timezone
+
+from app.models.agent_outputs import FitSLAOutput
+from app.models.workflow import WorkflowContext
+
+
+class FitSLAAgent:
+
+    @staticmethod
+    def run(context: WorkflowContext) -> FitSLAOutput:
+        lead = context.lead_record
+
+        # Provisional MVP fit-scoring assumption.
+        if lead.declared_need and lead.declared_need.strip():
+            fit_score = 30
+            fit_reason = "A declared business need is available."
+        else:
+            fit_score = 0
+            fit_reason = "No declared business need is available."
+
+        sla_flags = []
+
+        if lead.pending_follow_up:
+            if lead.follow_up_due_at is None:
+                sla_flags.append("FOLLOW_UP_DUE_DATE_MISSING")
+            else:
+                due_at = lead.follow_up_due_at
+
+                if due_at.tzinfo is None:
+                    due_at = due_at.replace(tzinfo=timezone.utc)
+
+                now = datetime.now(timezone.utc)
+
+                if due_at < now:
+                    sla_flags.append("FOLLOW_UP_OVERDUE")
+
+        result = FitSLAOutput(
+            fit_score=fit_score,
+            sla_flags=sla_flags,
+            reason=fit_reason,
+        )
+
+        context.fit_score = result.fit_score
+        context.sla_flags = result.sla_flags
+        context.agent_outputs["fit_sla"] = result.model_dump()
+
+        return result
+</file>
+
+<file path="backend/app/agents/lead_intake_agent.py">
+from app.models.agent_outputs import LeadIntakeOutput
+from app.models.workflow import WorkflowContext
+
+
+class LeadIntakeAgent:
+
+    @staticmethod
+    def run(context: WorkflowContext) -> LeadIntakeOutput:
+        lead = context.lead_record
+        errors = []
+
+        if not lead.lead_id.strip():
+            errors.append("Lead ID is missing.")
+
+        if not lead.source.strip():
+            errors.append("Lead source is missing.")
+
+        if not lead.stage.strip():
+            errors.append("Lead stage is missing.")
+
+        if not lead.contact_available:
+            errors.append("Mandatory contact information is unavailable.")
+
+        if errors:
+            result = LeadIntakeOutput(
+                status="invalid",
+                validated_lead=None,
+                errors=errors,
+            )
+        else:
+            validated_lead = lead.model_dump(mode="json")
+
+            result = LeadIntakeOutput(
+                status="valid",
+                validated_lead=validated_lead,
+                errors=[],
+            )
+
+            context.validated_lead = validated_lead
+
+        context.agent_outputs["lead_intake"] = result.model_dump()
+
+        if errors:
+            context.errors.extend(errors)
+
+        return result
+</file>
+
+<file path="backend/app/agents/lead_priority_agent.py">
+from app.models.agent_outputs import LeadPriorityOutput
+from app.models.workflow import WorkflowContext
+
+
+class LeadPriorityAgent:
+
+    @staticmethod
+    def run(context: WorkflowContext) -> LeadPriorityOutput:
+
+        recency = context.recency_score or 0
+        engagement = context.engagement_score or 0
+        fit = context.fit_score or 0
+
+        priority_score = min(
+            recency + engagement + fit,
+            100,
+        )
+
+        triggered_rules = []
+        reasons = []
+
+        # Rule 1: Missing mandatory contact information.
+        intake_output = context.agent_outputs.get(
+            "lead_intake", {}
+        )
+
+        if intake_output.get("status") == "invalid":
+            action = "REQUEST_DATA"
+            triggered_rules.append("MISSING_MANDATORY_DATA")
+            reasons.append(
+                "Mandatory lead information is missing or invalid."
+            )
+
+        # Rule 2: Overdue committed follow-up.
+        elif "FOLLOW_UP_OVERDUE" in context.sla_flags:
+            action = "FOLLOW_UP_NOW"
+            triggered_rules.append("OVERDUE_FOLLOW_UP")
+            reasons.append(
+                "A committed follow-up is overdue."
+            )
+
+        # Rule 3: High priority score.
+        elif priority_score >= 70:
+            action = "FOLLOW_UP_NOW"
+            triggered_rules.append("HIGH_PRIORITY_SCORE")
+            reasons.append(
+                "The lead has a high combined priority score."
+            )
+
+        # Rule 4: Moderate priority score.
+        elif priority_score >= 40:
+            action = "FOLLOW_UP_SOON"
+            triggered_rules.append("MODERATE_PRIORITY_SCORE")
+            reasons.append(
+                "The lead has a moderate combined priority score."
+            )
+
+        # Rule 5: Low priority score.
+        else:
+            action = "NURTURE"
+            triggered_rules.append("LOW_PRIORITY_SCORE")
+            reasons.append(
+                "The lead has a low combined priority score."
+            )
+
+        result = LeadPriorityOutput(
+            priority_score=priority_score,
+            action=action,
+            triggered_rules=triggered_rules,
+            reasons=reasons,
+        )
+
+        context.final_recommendation = result.model_dump()
+        context.agent_outputs["lead_priority"] = (
+            result.model_dump()
+        )
+
+        return result
+</file>
+
+<file path="backend/app/agents/recency_agent.py">
+from datetime import datetime, timezone
+from typing import Optional
+
+from app.models.agent_outputs import RecencyOutput
+from app.models.workflow import WorkflowContext
+
+
+class RecencyAgent:
+
+    @staticmethod
+    def run(context: WorkflowContext) -> RecencyOutput:
+        last_contact = context.lead_record.last_contact_at
+
+        if last_contact is None:
+            result = RecencyOutput(
+                score=0,
+                days_since_last_contact=None,
+                reason="No previous contact date is available.",
+            )
+        else:
+            now = datetime.now(timezone.utc)
+
+            if last_contact.tzinfo is None:
+                last_contact = last_contact.replace(
+                    tzinfo=timezone.utc
+                )
+
+            days = max(
+                0,
+                (now - last_contact).days,
+            )
+
+            # Provisional scoring assumptions for the MVP.
+            if days <= 7:
+                score = 30
+            elif days <= 30:
+                score = 20
+            elif days <= 60:
+                score = 10
+            else:
+                score = 0
+
+            result = RecencyOutput(
+                score=score,
+                days_since_last_contact=days,
+                reason=f"Last contact was {days} days ago.",
+            )
+
+        context.recency_score = result.score
+        context.agent_outputs["recency"] = result.model_dump()
+
+        return result
+</file>
+
+<file path="backend/app/api/__init__.py">
+
+</file>
+
+<file path="backend/app/data/__init__.py">
+
+</file>
+
+<file path="backend/app/data/seed_leads.py">
+from datetime import datetime, timezone, timedelta
+
+from app.models.lead import LeadRecord, EngagementEvent
+
+
+def get_seed_scenarios():
+
+    now = datetime.now(timezone.utc)
+
+    hot_lead = LeadRecord(
+        lead_id="LEAD-HOT-001",
+        source="Website",
+        created_at=now - timedelta(days=5),
+        last_contact_at=now - timedelta(days=2),
+        declared_need="Enterprise software",
+        stage="New",
+        contact_available=True,
+        pending_follow_up=True,
+        follow_up_due_at=now - timedelta(days=1),
+    )
+
+    hot_events = [
+        EngagementEvent(
+            event_id="HOT-E1",
+            event_type="inquiry",
+            occurred_at=now - timedelta(hours=2),
+        ),
+        EngagementEvent(
+            event_id="HOT-E2",
+            event_type="meeting_attended",
+            occurred_at=now - timedelta(hours=1),
+        ),
+    ]
+
+    warm_lead = LeadRecord(
+        lead_id="LEAD-WARM-001",
+        source="Referral",
+        created_at=now - timedelta(days=20),
+        last_contact_at=now - timedelta(days=15),
+        declared_need="CRM implementation",
+        stage="Contacted",
+        contact_available=True,
+    )
+
+    warm_events = [
+        EngagementEvent(
+            event_id="WARM-E1",
+            event_type="inquiry",
+            occurred_at=now - timedelta(days=3),
+        ),
+    ]
+
+    stale_lead = LeadRecord(
+        lead_id="LEAD-STALE-001",
+        source="Website",
+        created_at=now - timedelta(days=90),
+        last_contact_at=now - timedelta(days=75),
+        declared_need=None,
+        stage="New",
+        contact_available=True,
+    )
+
+    stale_events = []
+
+    return {
+        "hot": {
+            "description": "Recent inquiry with high fit and overdue follow-up.",
+            "lead": hot_lead,
+            "engagement_events": hot_events,
+        },
+        "warm": {
+            "description": "Moderate engagement with a valid declared need.",
+            "lead": warm_lead,
+            "engagement_events": warm_events,
+        },
+        "stale": {
+            "description": "Old lead with no recognized engagement.",
+            "lead": stale_lead,
+            "engagement_events": stale_events,
+        },
+    }
+</file>
+
+<file path="backend/app/models/__init__.py">
+
+</file>
+
+<file path="backend/app/models/agent_outputs.py">
+from typing import List, Optional
+
+from pydantic import BaseModel, Field
+
+
+class LeadIntakeOutput(BaseModel):
+    agent_name: str = "Lead Intake Agent"
+    status: str
+    validated_lead: Optional[dict] = None
+    errors: List[str] = Field(default_factory=list)
+
+
+class RecencyOutput(BaseModel):
+    agent_name: str = "Recency Agent"
+    score: float
+    days_since_last_contact: Optional[int] = None
+    reason: str
+
+
+class EngagementOutput(BaseModel):
+    agent_name: str = "Engagement Agent"
+    score: float
+    event_count: int
+    recognized_events: List[str] = Field(default_factory=list)
+    reason: str
+
+
+class FitSLAOutput(BaseModel):
+    agent_name: str = "Fit & SLA Agent"
+    fit_score: float
+    sla_flags: List[str] = Field(default_factory=list)
+    reason: str
+
+
+class LeadPriorityOutput(BaseModel):
+    agent_name: str = "Lead Priority Decision Agent"
+    priority_score: float
+    action: str
+    triggered_rules: List[str] = Field(default_factory=list)
+    reasons: List[str] = Field(default_factory=list)
+</file>
+
+<file path="backend/app/models/lead.py">
+from datetime import datetime
+from typing import Optional
+
+from pydantic import BaseModel, Field
+
+
+class EngagementEvent(BaseModel):
+    event_id: str
+    event_type: str
+    occurred_at: datetime
+
+
+class LeadRecord(BaseModel):
+    lead_id: str = Field(..., min_length=1)
+    source: str = Field(..., min_length=1)
+
+    created_at: datetime
+    last_contact_at: Optional[datetime] = None
+
+    declared_need: Optional[str] = None
+    stage: str = Field(..., min_length=1)
+
+    contact_available: bool = True
+
+    pending_follow_up: bool = False
+    follow_up_due_at: Optional[datetime] = None
+</file>
+
+<file path="backend/app/rules/__init__.py">
+
+</file>
+
+<file path="backend/app/services/__init__.py">
+
+</file>
+
+<file path="backend/app/services/context_builder.py">
+from typing import List
+
+from app.models.lead import EngagementEvent, LeadRecord
+from app.models.workflow import WorkflowContext
+
+
+class ContextBuilder:
+
+    @staticmethod
+    def build(
+        lead_record: LeadRecord,
+        engagement_events: List[EngagementEvent] | None = None,
+    ) -> WorkflowContext:
+
+        normalized_lead = lead_record.model_copy(
+            update={
+                "source": lead_record.source.strip(),
+                "stage": lead_record.stage.strip(),
+            }
+        )
+
+        context = WorkflowContext(
+            lead_record=normalized_lead,
+            engagement_events=engagement_events or [],
+        )
+
+        context.validated_lead = normalized_lead.model_dump(
+            mode="json"
+        )
+
+        return context
+</file>
+
+<file path="backend/app/services/explanation_service.py">
+from app.models.workflow import WorkflowContext
+
+
+class ExplanationService:
+
+    @staticmethod
+    def build(context: WorkflowContext) -> dict:
+
+        agent_names = {
+            "lead_intake": "Lead Intake Agent",
+            "recency": "Recency Agent",
+            "engagement": "Engagement Agent",
+            "fit_sla": "Fit & SLA Agent",
+            "lead_priority": "Lead Priority Decision Agent",
+        }
+
+        executed_agents = [
+            agent_names[key]
+            for key in context.agent_outputs
+            if key in agent_names
+        ]
+
+        recommendation = context.final_recommendation or {}
+
+        action = recommendation.get(
+            "action",
+            "NOT_AVAILABLE",
+        )
+
+        score = recommendation.get(
+            "priority_score",
+            0,
+        )
+
+        triggered_rules = recommendation.get(
+            "triggered_rules",
+            [],
+        )
+
+        reasons = recommendation.get(
+            "reasons",
+            [],
+        )
+
+        explanation = {
+            "summary": (
+                f"Lead {context.lead_record.lead_id} "
+                f"received the recommendation {action} "
+                f"with a priority score of {score}/100."
+            ),
+            "executed_agents": executed_agents,
+            "score_breakdown": {
+                "recency": context.recency_score,
+                "engagement": context.engagement_score,
+                "fit": context.fit_score,
+            },
+            "triggered_rules": triggered_rules,
+            "reasons": reasons,
+            "limitations": list(context.errors),
+        }
+
+        context.explanation = explanation
+
+        return explanation
+</file>
+
+<file path="backend/app/services/gemini_explainer.py">
+import json
+
+from google import genai
+from google.genai import types
+
+from app.models.workflow import WorkflowContext
+from app.services.llm_config import LLMConfig
+
+
+class GeminiExplainer:
+
+    MAX_SUMMARY_LENGTH = 500
+
+    @staticmethod
+    def enhance(context: WorkflowContext) -> dict:
+        explanation = context.explanation or {}
+        recommendation = context.final_recommendation or {}
+
+        fallback_summary = explanation.get("summary", "")
+
+        fallback_result = {
+            "summary": fallback_summary,
+            "status": "fallback",
+            "provider": "gemini",
+            "model": LLMConfig.MODEL,
+            "reason": "provider_unavailable",
+        }
+
+        if not LLMConfig.is_configured():
+            fallback_result["reason"] = "not_configured"
+            return fallback_result
+
+        action = recommendation.get("action", "NOT_AVAILABLE")
+        score = recommendation.get("priority_score", 0)
+
+        # Do not send the lead identifier to the external LLM.
+        evidence = {
+            "recommendation": action,
+            "priority_score": score,
+            "score_breakdown": explanation.get(
+                "score_breakdown", {}
+            ),
+            "triggered_rules": explanation.get(
+                "triggered_rules", []
+            ),
+            "reasons": explanation.get("reasons", []),
+            "executed_agents": explanation.get(
+                "executed_agents", []
+            ),
+        }
+
+        prompt = f"""
+You are an explanation assistant for a deterministic sales
+lead prioritization system.
+
+Rewrite the existing decision explanation into a clear,
+professional summary of one or two sentences.
+
+Use ONLY the supplied structured evidence.
+
+Mandatory requirements:
+- Preserve the exact recommendation action.
+- Preserve the exact priority score out of 100.
+- Do not invent facts or add unsupported reasons.
+- Do not change, reinterpret, or question the decision.
+- Do not make predictions or promises.
+- Do not make claims about health, legal compliance,
+  or customer behavior beyond the supplied evidence.
+- Do not recommend contacting a customer autonomously.
+- Return only the rewritten summary, without headings.
+
+Structured evidence:
+{json.dumps(evidence, ensure_ascii=False)}
+"""
+
+        try:
+            client = genai.Client(
+                api_key=LLMConfig.API_KEY,
+                http_options=types.HttpOptions(
+                    timeout=int(LLMConfig.TIMEOUT * 1000)
+                ),
+            )
+
+            response = client.models.generate_content(
+                model=LLMConfig.MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    max_output_tokens=120,
+                ),
+            )
+
+            summary = (response.text or "").strip()
+
+            if not GeminiExplainer._is_valid_summary(
+                summary,
+                action,
+                score,
+            ):
+                fallback_result["reason"] = "invalid_response"
+                return fallback_result
+
+            return {
+                "summary": summary,
+                "status": "completed",
+                "provider": "gemini",
+                "model": LLMConfig.MODEL,
+                "reason": "none",
+            }
+
+        except Exception as exc:
+            fallback_result["reason"] = (
+                "timeout"
+                if "timeout" in type(exc).__name__.lower()
+                else "provider_error"
+            )
+            return fallback_result
+
+    @staticmethod
+    def _is_valid_summary(
+        summary: str,
+        action: str,
+        score,
+    ) -> bool:
+        if not summary:
+            return False
+
+        if len(summary) > GeminiExplainer.MAX_SUMMARY_LENGTH:
+            return False
+
+        if "\n" in summary or "\r" in summary:
+            return False
+
+        required_values = [
+            action,
+            str(score),
+        ]
+
+        normalized_summary = summary.casefold()
+
+        return all(
+            value.casefold() in normalized_summary
+            for value in required_values
+        )
+</file>
+
+<file path="backend/app/services/llm_config.py">
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+ENV_FILE = BACKEND_DIR / ".env"
+
+load_dotenv(ENV_FILE)
+
+
+class LLMConfig:
+    PROVIDER = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
+
+    MODEL = os.getenv(
+        "GEMINI_MODEL",
+        "gemini-3.5-flash-lite",
+    ).strip()
+
+    API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+
+    TIMEOUT = float(os.getenv("LLM_TIMEOUT", "15"))
+
+    @classmethod
+    def is_configured(cls) -> bool:
+        return (
+            cls.PROVIDER == "gemini"
+            and bool(cls.API_KEY)
+            and bool(cls.MODEL)
+        )
+</file>
+
+<file path="backend/app/services/workflow_state.py">
+from typing import List, TypedDict
+
+from app.models.lead import EngagementEvent, LeadRecord
+from app.models.workflow import WorkflowContext
+
+
+class WorkflowState(TypedDict, total=False):
+    """
+    Shared state passed between LangGraph workflow nodes.
+    """
+
+    lead_record: LeadRecord
+    engagement_events: List[EngagementEvent]
+
+    context: WorkflowContext
+
+    intake_valid: bool
+    execution_failed: bool
+</file>
+
+<file path="backend/app/__init__.py">
+
+</file>
+
+<file path="backend/app/main.py">
+from fastapi import FastAPI
+
+from app.api.routes.leads import router as leads_router
+
+
+app = FastAPI(
+    title="AA007 - Lead Follow-up Prioritization Intelligence",
+    description="Deterministic Agentic AI MVP for prioritizing sales lead follow-ups.",
+    version="1.0.0",
+)
+
+
+@app.get("/api/assistant/health")
+def health_check():
+    return {
+        "status": "healthy",
+        "application": "AA007 Lead Follow-up Prioritization Intelligence",
+        "version": "1.0.0",
+    }
+
+
+app.include_router(leads_router)
+</file>
+
+<file path="backend/tests/__init__.py">
+
+</file>
+
+<file path="backend/tests/test_gemini_explainer.py">
+from datetime import datetime, timezone
+
+import pytest
+
+from app.models.lead import LeadRecord
+from app.services.context_builder import ContextBuilder
+from app.services.explanation_service import ExplanationService
+from app.services.gemini_explainer import GeminiExplainer
+
+
+@pytest.fixture
+def workflow_context():
+    lead = LeadRecord(
+        lead_id="LEAD-GEMINI-001",
+        source="Website",
+        created_at=datetime(2026, 11, 10, tzinfo=timezone.utc),
+        last_contact_at=datetime(2026, 11, 12, tzinfo=timezone.utc),
+        declared_need="Enterprise software",
+        stage="Qualified",
+        contact_available=True,
+        pending_follow_up=True,
+    )
+
+    context = ContextBuilder.build(lead)
+
+    context.final_recommendation = {
+        "action": "FOLLOW_UP_NOW",
+        "priority_score": 95,
+        "triggered_rules": ["OVERDUE_FOLLOW_UP"],
+        "reasons": ["Follow-up is overdue"],
+    }
+
+    ExplanationService.build(context)
+
+    return context
+from types import SimpleNamespace
+
+
+def test_gemini_success_returns_valid_summary(
+    workflow_context,
+    monkeypatch,
+):
+    expected_summary = (
+        "LEAD-GEMINI-001 receives FOLLOW_UP_NOW "
+        "with a priority score of 95/100."
+    )
+
+    class MockModels:
+        @staticmethod
+        def generate_content(**kwargs):
+            return SimpleNamespace(text=expected_summary)
+
+    class MockClient:
+        def __init__(self, **kwargs):
+            self.models = MockModels()
+
+    monkeypatch.setattr(
+        "app.services.gemini_explainer.genai.Client",
+        MockClient,
+    )
+
+    monkeypatch.setattr(
+        "app.services.llm_config.LLMConfig.is_configured",
+        classmethod(lambda cls: True),
+    )
+
+    result = GeminiExplainer.enhance(workflow_context)
+
+    assert result["status"] == "completed"
+    assert result["provider"] == "gemini"
+    assert result["summary"] == expected_summary
+    assert result["reason"] == "none"
+def test_gemini_provider_error_uses_deterministic_fallback(
+    workflow_context,
+    monkeypatch,
+):
+    class MockModels:
+        @staticmethod
+        def generate_content(**kwargs):
+            raise RuntimeError("Simulated provider failure")
+
+    class MockClient:
+        def __init__(self, **kwargs):
+            self.models = MockModels()
+
+    monkeypatch.setattr(
+        "app.services.gemini_explainer.genai.Client",
+        MockClient,
+    )
+
+    monkeypatch.setattr(
+        "app.services.llm_config.LLMConfig.is_configured",
+        classmethod(lambda cls: True),
+    )
+
+    original_summary = workflow_context.explanation["summary"]
+
+    result = GeminiExplainer.enhance(workflow_context)
+
+    assert result["status"] == "fallback"
+    assert result["reason"] == "provider_error"
+    assert result["summary"] == original_summary
+    assert workflow_context.final_recommendation["action"] == "FOLLOW_UP_NOW"
+    assert workflow_context.final_recommendation["priority_score"] == 95
+def test_gemini_timeout_uses_deterministic_fallback(
+    workflow_context,
+    monkeypatch,
+):
+    class MockModels:
+        @staticmethod
+        def generate_content(**kwargs):
+            raise TimeoutError("Simulated Gemini timeout")
+
+    class MockClient:
+        def __init__(self, **kwargs):
+            self.models = MockModels()
+
+    monkeypatch.setattr(
+        "app.services.gemini_explainer.genai.Client",
+        MockClient,
+    )
+
+    monkeypatch.setattr(
+        "app.services.llm_config.LLMConfig.is_configured",
+        classmethod(lambda cls: True),
+    )
+
+    original_summary = workflow_context.explanation["summary"]
+
+    result = GeminiExplainer.enhance(workflow_context)
+
+    assert result["status"] == "fallback"
+    assert result["reason"] == "timeout"
+    assert result["summary"] == original_summary
+    assert workflow_context.final_recommendation["action"] == "FOLLOW_UP_NOW"
+    assert workflow_context.final_recommendation["priority_score"] == 95
+def test_gemini_invalid_response_uses_deterministic_fallback(
+    workflow_context,
+    monkeypatch,
+):
+    class MockModels:
+        @staticmethod
+        def generate_content(**kwargs):
+            return SimpleNamespace(
+                text="This lead may be worth reviewing."
+            )
+
+    class MockClient:
+        def __init__(self, **kwargs):
+            self.models = MockModels()
+
+    monkeypatch.setattr(
+        "app.services.gemini_explainer.genai.Client",
+        MockClient,
+    )
+
+    monkeypatch.setattr(
+        "app.services.llm_config.LLMConfig.is_configured",
+        classmethod(lambda cls: True),
+    )
+
+    original_summary = workflow_context.explanation["summary"]
+
+    result = GeminiExplainer.enhance(workflow_context)
+
+    assert result["status"] == "fallback"
+    assert result["reason"] == "invalid_response"
+    assert result["summary"] == original_summary
+    assert workflow_context.final_recommendation["action"] == "FOLLOW_UP_NOW"
+    assert workflow_context.final_recommendation["priority_score"] == 95
+def test_gemini_missing_configuration_uses_fallback(
+    workflow_context,
+    monkeypatch,
+):
+    def unexpected_client_call(**kwargs):
+        raise AssertionError(
+            "Gemini client should not be created when unconfigured"
+        )
+
+    monkeypatch.setattr(
+        "app.services.gemini_explainer.genai.Client",
+        unexpected_client_call,
+    )
+
+    monkeypatch.setattr(
+        "app.services.llm_config.LLMConfig.is_configured",
+        classmethod(lambda cls: False),
+    )
+
+    original_summary = workflow_context.explanation["summary"]
+
+    result = GeminiExplainer.enhance(workflow_context)
+
+    assert result["status"] == "fallback"
+    assert result["reason"] == "not_configured"
+    assert result["summary"] == original_summary
+def test_gemini_prompt_excludes_lead_identifier(
+    workflow_context,
+    monkeypatch,
+):
+    captured_prompt = {}
+
+    expected_summary = (
+        "FOLLOW_UP_NOW with a priority score of 95/100."
+    )
+
+    class MockModels:
+        @staticmethod
+        def generate_content(**kwargs):
+            captured_prompt["contents"] = kwargs["contents"]
+            return SimpleNamespace(text=expected_summary)
+
+    class MockClient:
+        def __init__(self, **kwargs):
+            self.models = MockModels()
+
+    monkeypatch.setattr(
+        "app.services.gemini_explainer.genai.Client",
+        MockClient,
+    )
+
+    monkeypatch.setattr(
+        "app.services.llm_config.LLMConfig.is_configured",
+        classmethod(lambda cls: True),
+    )
+
+    result = GeminiExplainer.enhance(workflow_context)
+
+    assert result["status"] == "completed"
+    assert "FOLLOW_UP_NOW" in captured_prompt["contents"]
+    assert "95" in captured_prompt["contents"]
+    assert "LEAD-GEMINI-001" not in captured_prompt["contents"]
+def test_gemini_preserves_request_data_recommendation(
+    monkeypatch,
+):
+    lead = LeadRecord(
+        lead_id="LEAD-MISSING-CONTACT",
+        source="Website",
+        created_at=datetime(2026, 11, 10, tzinfo=timezone.utc),
+        stage="New",
+        contact_available=False,
+    )
+
+    context = ContextBuilder.build(lead)
+
+    context.final_recommendation = {
+        "action": "REQUEST_DATA",
+        "priority_score": 0,
+        "triggered_rules": [],
+        "reasons": ["Mandatory contact information is missing"],
+    }
+
+    ExplanationService.build(context)
+
+    expected_summary = (
+        "REQUEST_DATA with a priority score of 0/100 "
+        "because mandatory contact information is missing."
+    )
+
+    class MockModels:
+        @staticmethod
+        def generate_content(**kwargs):
+            return SimpleNamespace(text=expected_summary)
+
+    class MockClient:
+        def __init__(self, **kwargs):
+            self.models = MockModels()
+
+    monkeypatch.setattr(
+        "app.services.gemini_explainer.genai.Client",
+        MockClient,
+    )
+
+    monkeypatch.setattr(
+        "app.services.llm_config.LLMConfig.is_configured",
+        classmethod(lambda cls: True),
+    )
+
+    result = GeminiExplainer.enhance(context)
+
+    assert result["status"] == "completed"
+    assert result["summary"] == expected_summary
+    assert context.final_recommendation["action"] == "REQUEST_DATA"
+    assert context.final_recommendation["priority_score"] == 0
+</file>
+
+<file path="backend/.dockerignore">
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+</file>
+
+<file path="backend/.env.example">
+# Google Gemini configuration
+GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_MODEL=gemini-3.5-flash-lite
+
+# LLM service configuration
+LLM_PROVIDER=gemini
+LLM_TIMEOUT=15
+</file>
+
+<file path="backend/.gitignore">
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test and coverage files
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# IDE and editor files
+.vscode/
+.idea/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+</file>
+
+<file path="frontend/public/favicon.svg">
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="46" fill="none" viewBox="0 0 48 46"><path fill="#863bff" d="M25.946 44.938c-.664.845-2.021.375-2.021-.698V33.937a2.26 2.26 0 0 0-2.262-2.262H10.287c-.92 0-1.456-1.04-.92-1.788l7.48-10.471c1.07-1.497 0-3.578-1.842-3.578H1.237c-.92 0-1.456-1.04-.92-1.788L10.013.474c.214-.297.556-.474.92-.474h28.894c.92 0 1.456 1.04.92 1.788l-7.48 10.471c-1.07 1.498 0 3.579 1.842 3.579h11.377c.943 0 1.473 1.088.89 1.83L25.947 44.94z" style="fill:#863bff;fill:color(display-p3 .5252 .23 1);fill-opacity:1"/><mask id="a" width="48" height="46" x="0" y="0" maskUnits="userSpaceOnUse" style="mask-type:alpha"><path fill="#000" d="M25.842 44.938c-.664.844-2.021.375-2.021-.698V33.937a2.26 2.26 0 0 0-2.262-2.262H10.183c-.92 0-1.456-1.04-.92-1.788l7.48-10.471c1.07-1.498 0-3.579-1.842-3.579H1.133c-.92 0-1.456-1.04-.92-1.787L9.91.473c.214-.297.556-.474.92-.474h28.894c.92 0 1.456 1.04.92 1.788l-7.48 10.471c-1.07 1.498 0 3.578 1.842 3.578h11.377c.943 0 1.473 1.088.89 1.832L25.843 44.94z" style="fill:#000;fill-opacity:1"/></mask><g mask="url(#a)"><g filter="url(#b)"><ellipse cx="5.508" cy="14.704" fill="#ede6ff" rx="5.508" ry="14.704" style="fill:#ede6ff;fill:color(display-p3 .9275 .9033 1);fill-opacity:1" transform="matrix(.00324 1 1 -.00324 -4.47 31.516)"/></g><g filter="url(#c)"><ellipse cx="10.399" cy="29.851" fill="#ede6ff" rx="10.399" ry="29.851" style="fill:#ede6ff;fill:color(display-p3 .9275 .9033 1);fill-opacity:1" transform="matrix(.00324 1 1 -.00324 -39.328 7.883)"/></g><g filter="url(#d)"><ellipse cx="5.508" cy="30.487" fill="#7e14ff" rx="5.508" ry="30.487" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.814 -25.913 -14.639)scale(1 -1)"/></g><g filter="url(#e)"><ellipse cx="5.508" cy="30.599" fill="#7e14ff" rx="5.508" ry="30.599" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.814 -32.644 -3.334)scale(1 -1)"/></g><g filter="url(#f)"><ellipse cx="5.508" cy="30.599" fill="#7e14ff" rx="5.508" ry="30.599" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="matrix(.00324 1 1 -.00324 -34.34 30.47)"/></g><g filter="url(#g)"><ellipse cx="14.072" cy="22.078" fill="#ede6ff" rx="14.072" ry="22.078" style="fill:#ede6ff;fill:color(display-p3 .9275 .9033 1);fill-opacity:1" transform="rotate(93.35 24.506 48.493)scale(-1 1)"/></g><g filter="url(#h)"><ellipse cx="3.47" cy="21.501" fill="#7e14ff" rx="3.47" ry="21.501" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.009 28.708 47.59)scale(-1 1)"/></g><g filter="url(#i)"><ellipse cx="3.47" cy="21.501" fill="#7e14ff" rx="3.47" ry="21.501" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.009 28.708 47.59)scale(-1 1)"/></g><g filter="url(#j)"><ellipse cx=".387" cy="8.972" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(39.51 .387 8.972)"/></g><g filter="url(#k)"><ellipse cx="47.523" cy="-6.092" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 47.523 -6.092)"/></g><g filter="url(#l)"><ellipse cx="41.412" cy="6.333" fill="#47bfff" rx="5.971" ry="9.665" style="fill:#47bfff;fill:color(display-p3 .2799 .748 1);fill-opacity:1" transform="rotate(37.892 41.412 6.333)"/></g><g filter="url(#m)"><ellipse cx="-1.879" cy="38.332" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 -1.88 38.332)"/></g><g filter="url(#n)"><ellipse cx="-1.879" cy="38.332" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 -1.88 38.332)"/></g><g filter="url(#o)"><ellipse cx="35.651" cy="29.907" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 35.651 29.907)"/></g><g filter="url(#p)"><ellipse cx="38.418" cy="32.4" fill="#47bfff" rx="5.971" ry="15.297" style="fill:#47bfff;fill:color(display-p3 .2799 .748 1);fill-opacity:1" transform="rotate(37.892 38.418 32.4)"/></g></g><defs><filter id="b" width="60.045" height="41.654" x="-19.77" y="16.149" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="7.659"/></filter><filter id="c" width="90.34" height="51.437" x="-54.613" y="-7.533" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="7.659"/></filter><filter id="d" width="79.355" height="29.4" x="-49.64" y="2.03" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="e" width="79.579" height="29.4" x="-45.045" y="20.029" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="f" width="79.579" height="29.4" x="-43.513" y="21.178" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="g" width="74.749" height="58.852" x="15.756" y="-17.901" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="7.659"/></filter><filter id="h" width="61.377" height="25.362" x="23.548" y="2.284" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="i" width="61.377" height="25.362" x="23.548" y="2.284" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="j" width="56.045" height="63.649" x="-27.636" y="-22.853" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="k" width="54.814" height="64.646" x="20.116" y="-38.415" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="l" width="33.541" height="35.313" x="24.641" y="-11.323" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="m" width="54.814" height="64.646" x="-29.286" y="6.009" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="n" width="54.814" height="64.646" x="-29.286" y="6.009" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="o" width="54.814" height="64.646" x="8.244" y="-2.416" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="p" width="39.409" height="43.623" x="18.713" y="10.588" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter></defs></svg>
+</file>
+
+<file path="frontend/public/icons.svg">
+<svg xmlns="http://www.w3.org/2000/svg">
+  <symbol id="bluesky-icon" viewBox="0 0 16 17">
+    <g clip-path="url(#bluesky-clip)"><path fill="#08060d" d="M7.75 7.735c-.693-1.348-2.58-3.86-4.334-5.097-1.68-1.187-2.32-.981-2.74-.79C.188 2.065.1 2.812.1 3.251s.241 3.602.398 4.13c.52 1.744 2.367 2.333 4.07 2.145-2.495.37-4.71 1.278-1.805 4.512 3.196 3.309 4.38-.71 4.987-2.746.608 2.036 1.307 5.91 4.93 2.746 2.72-2.746.747-4.143-1.747-4.512 1.702.189 3.55-.4 4.07-2.145.156-.528.397-3.691.397-4.13s-.088-1.186-.575-1.406c-.42-.19-1.06-.395-2.741.79-1.755 1.24-3.64 3.752-4.334 5.099"/></g>
+    <defs><clipPath id="bluesky-clip"><path fill="#fff" d="M.1.85h15.3v15.3H.1z"/></clipPath></defs>
+  </symbol>
+  <symbol id="discord-icon" viewBox="0 0 20 19">
+    <path fill="#08060d" d="M16.224 3.768a14.5 14.5 0 0 0-3.67-1.153c-.158.286-.343.67-.47.976a13.5 13.5 0 0 0-4.067 0c-.128-.306-.317-.69-.476-.976A14.4 14.4 0 0 0 3.868 3.77C1.546 7.28.916 10.703 1.231 14.077a14.7 14.7 0 0 0 4.5 2.306q.545-.748.965-1.587a9.5 9.5 0 0 1-1.518-.74q.191-.14.372-.293c2.927 1.369 6.107 1.369 8.999 0q.183.152.372.294-.723.437-1.52.74.418.838.963 1.588a14.6 14.6 0 0 0 4.504-2.308c.37-3.911-.63-7.302-2.644-10.309m-9.13 8.234c-.878 0-1.599-.82-1.599-1.82 0-.998.705-1.82 1.6-1.82.894 0 1.614.82 1.599 1.82.001 1-.705 1.82-1.6 1.82m5.91 0c-.878 0-1.599-.82-1.599-1.82 0-.998.705-1.82 1.6-1.82.893 0 1.614.82 1.599 1.82 0 1-.706 1.82-1.6 1.82"/>
+  </symbol>
+  <symbol id="documentation-icon" viewBox="0 0 21 20">
+    <path fill="none" stroke="#aa3bff" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35" d="m15.5 13.333 1.533 1.322c.645.555.967.833.967 1.178s-.322.623-.967 1.179L15.5 18.333m-3.333-5-1.534 1.322c-.644.555-.966.833-.966 1.178s.322.623.966 1.179l1.534 1.321"/>
+    <path fill="none" stroke="#aa3bff" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35" d="M17.167 10.836v-4.32c0-1.41 0-2.117-.224-2.68-.359-.906-1.118-1.621-2.08-1.96-.599-.21-1.349-.21-2.848-.21-2.623 0-3.935 0-4.983.369-1.684.591-3.013 1.842-3.641 3.428C3 6.449 3 7.684 3 10.154v2.122c0 2.558 0 3.838.706 4.726q.306.383.713.671c.76.536 1.79.64 3.581.66"/>
+    <path fill="none" stroke="#aa3bff" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35" d="M3 10a2.78 2.78 0 0 1 2.778-2.778c.555 0 1.209.097 1.748-.047.48-.129.854-.503.982-.982.145-.54.048-1.194.048-1.749a2.78 2.78 0 0 1 2.777-2.777"/>
+  </symbol>
+  <symbol id="github-icon" viewBox="0 0 19 19">
+    <path fill="#08060d" fill-rule="evenodd" d="M9.356 1.85C5.05 1.85 1.57 5.356 1.57 9.694a7.84 7.84 0 0 0 5.324 7.44c.387.079.528-.168.528-.376 0-.182-.013-.805-.013-1.454-2.165.467-2.616-.935-2.616-.935-.349-.91-.864-1.143-.864-1.143-.71-.48.051-.48.051-.48.787.051 1.2.805 1.2.805.695 1.194 1.817.857 2.268.649.064-.507.27-.857.49-1.052-1.728-.182-3.545-.857-3.545-3.87 0-.857.31-1.558.8-2.104-.078-.195-.349-1 .077-2.078 0 0 .657-.208 2.14.805a7.5 7.5 0 0 1 1.946-.26c.657 0 1.328.092 1.946.26 1.483-1.013 2.14-.805 2.14-.805.426 1.078.155 1.883.078 2.078.502.546.799 1.247.799 2.104 0 3.013-1.818 3.675-3.558 3.87.284.247.528.714.528 1.454 0 1.052-.012 1.896-.012 2.156 0 .208.142.455.528.377a7.84 7.84 0 0 0 5.324-7.441c.013-4.338-3.48-7.844-7.773-7.844" clip-rule="evenodd"/>
+  </symbol>
+  <symbol id="social-icon" viewBox="0 0 20 20">
+    <path fill="none" stroke="#aa3bff" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35" d="M12.5 6.667a4.167 4.167 0 1 0-8.334 0 4.167 4.167 0 0 0 8.334 0"/>
+    <path fill="none" stroke="#aa3bff" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35" d="M2.5 16.667a5.833 5.833 0 0 1 8.75-5.053m3.837.474.513 1.035c.07.144.257.282.414.309l.93.155c.596.1.736.536.307.965l-.723.73a.64.64 0 0 0-.152.531l.207.903c.164.715-.213.991-.84.618l-.872-.52a.63.63 0 0 0-.577 0l-.872.52c-.624.373-1.003.094-.84-.618l.207-.903a.64.64 0 0 0-.152-.532l-.723-.729c-.426-.43-.289-.864.306-.964l.93-.156a.64.64 0 0 0 .412-.31l.513-1.034c.28-.562.735-.562 1.012 0"/>
+  </symbol>
+  <symbol id="x-icon" viewBox="0 0 19 19">
+    <path fill="#08060d" fill-rule="evenodd" d="M1.893 1.98c.052.072 1.245 1.769 2.653 3.77l2.892 4.114c.183.261.333.48.333.486s-.068.089-.152.183l-.522.593-.765.867-3.597 4.087c-.375.426-.734.834-.798.905a1 1 0 0 0-.118.148c0 .01.236.017.664.017h.663l.729-.83c.4-.457.796-.906.879-.999a692 692 0 0 0 1.794-2.038c.034-.037.301-.34.594-.675l.551-.624.345-.392a7 7 0 0 1 .34-.374c.006 0 .93 1.306 2.052 2.903l2.084 2.965.045.063h2.275c1.87 0 2.273-.003 2.266-.021-.008-.02-1.098-1.572-3.894-5.547-2.013-2.862-2.28-3.246-2.273-3.266.008-.019.282-.332 2.085-2.38l2-2.274 1.567-1.782c.022-.028-.016-.03-.65-.03h-.674l-.3.342a871 871 0 0 1-1.782 2.025c-.067.075-.405.458-.75.852a100 100 0 0 1-.803.91c-.148.172-.299.344-.99 1.127-.304.343-.32.358-.345.327-.015-.019-.904-1.282-1.976-2.808L6.365 1.85H1.8zm1.782.91 8.078 11.294c.772 1.08 1.413 1.973 1.425 1.984.016.017.241.02 1.05.017l1.03-.004-2.694-3.766L7.796 5.75 5.722 2.852l-1.039-.004-1.039-.004z" clip-rule="evenodd"/>
+  </symbol>
+</svg>
+</file>
+
+<file path="frontend/src/assets/react.svg">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" role="img" class="iconify iconify--logos" width="35.93" height="32" preserveAspectRatio="xMidYMid meet" viewBox="0 0 256 228"><path fill="#00D8FF" d="M210.483 73.824a171.49 171.49 0 0 0-8.24-2.597c.465-1.9.893-3.777 1.273-5.621c6.238-30.281 2.16-54.676-11.769-62.708c-13.355-7.7-35.196.329-57.254 19.526a171.23 171.23 0 0 0-6.375 5.848a155.866 155.866 0 0 0-4.241-3.917C100.759 3.829 77.587-4.822 63.673 3.233C50.33 10.957 46.379 33.89 51.995 62.588a170.974 170.974 0 0 0 1.892 8.48c-3.28.932-6.445 1.924-9.474 2.98C17.309 83.498 0 98.307 0 113.668c0 15.865 18.582 31.778 46.812 41.427a145.52 145.52 0 0 0 6.921 2.165a167.467 167.467 0 0 0-2.01 9.138c-5.354 28.2-1.173 50.591 12.134 58.266c13.744 7.926 36.812-.22 59.273-19.855a145.567 145.567 0 0 0 5.342-4.923a168.064 168.064 0 0 0 6.92 6.314c21.758 18.722 43.246 26.282 56.54 18.586c13.731-7.949 18.194-32.003 12.4-61.268a145.016 145.016 0 0 0-1.535-6.842c1.62-.48 3.21-.974 4.76-1.488c29.348-9.723 48.443-25.443 48.443-41.52c0-15.417-17.868-30.326-45.517-39.844Zm-6.365 70.984c-1.4.463-2.836.91-4.3 1.345c-3.24-10.257-7.612-21.163-12.963-32.432c5.106-11 9.31-21.767 12.459-31.957c2.619.758 5.16 1.557 7.61 2.4c23.69 8.156 38.14 20.213 38.14 29.504c0 9.896-15.606 22.743-40.946 31.14Zm-10.514 20.834c2.562 12.94 2.927 24.64 1.23 33.787c-1.524 8.219-4.59 13.698-8.382 15.893c-8.067 4.67-25.32-1.4-43.927-17.412a156.726 156.726 0 0 1-6.437-5.87c7.214-7.889 14.423-17.06 21.459-27.246c12.376-1.098 24.068-2.894 34.671-5.345a134.17 134.17 0 0 1 1.386 6.193ZM87.276 214.515c-7.882 2.783-14.16 2.863-17.955.675c-8.075-4.657-11.432-22.636-6.853-46.752a156.923 156.923 0 0 1 1.869-8.499c10.486 2.32 22.093 3.988 34.498 4.994c7.084 9.967 14.501 19.128 21.976 27.15a134.668 134.668 0 0 1-4.877 4.492c-9.933 8.682-19.886 14.842-28.658 17.94ZM50.35 144.747c-12.483-4.267-22.792-9.812-29.858-15.863c-6.35-5.437-9.555-10.836-9.555-15.216c0-9.322 13.897-21.212 37.076-29.293c2.813-.98 5.757-1.905 8.812-2.773c3.204 10.42 7.406 21.315 12.477 32.332c-5.137 11.18-9.399 22.249-12.634 32.792a134.718 134.718 0 0 1-6.318-1.979Zm12.378-84.26c-4.811-24.587-1.616-43.134 6.425-47.789c8.564-4.958 27.502 2.111 47.463 19.835a144.318 144.318 0 0 1 3.841 3.545c-7.438 7.987-14.787 17.08-21.808 26.988c-12.04 1.116-23.565 2.908-34.161 5.309a160.342 160.342 0 0 1-1.76-7.887Zm110.427 27.268a347.8 347.8 0 0 0-7.785-12.803c8.168 1.033 15.994 2.404 23.343 4.08c-2.206 7.072-4.956 14.465-8.193 22.045a381.151 381.151 0 0 0-7.365-13.322Zm-45.032-43.861c5.044 5.465 10.096 11.566 15.065 18.186a322.04 322.04 0 0 0-30.257-.006c4.974-6.559 10.069-12.652 15.192-18.18ZM82.802 87.83a323.167 323.167 0 0 0-7.227 13.238c-3.184-7.553-5.909-14.98-8.134-22.152c7.304-1.634 15.093-2.97 23.209-3.984a321.524 321.524 0 0 0-7.848 12.897Zm8.081 65.352c-8.385-.936-16.291-2.203-23.593-3.793c2.26-7.3 5.045-14.885 8.298-22.6a321.187 321.187 0 0 0 7.257 13.246c2.594 4.48 5.28 8.868 8.038 13.147Zm37.542 31.03c-5.184-5.592-10.354-11.779-15.403-18.433c4.902.192 9.899.29 14.978.29c5.218 0 10.376-.117 15.453-.343c-4.985 6.774-10.018 12.97-15.028 18.486Zm52.198-57.817c3.422 7.8 6.306 15.345 8.596 22.52c-7.422 1.694-15.436 3.058-23.88 4.071a382.417 382.417 0 0 0 7.859-13.026a347.403 347.403 0 0 0 7.425-13.565Zm-16.898 8.101a358.557 358.557 0 0 1-12.281 19.815a329.4 329.4 0 0 1-23.444.823c-7.967 0-15.716-.248-23.178-.732a310.202 310.202 0 0 1-12.513-19.846h.001a307.41 307.41 0 0 1-10.923-20.627a310.278 310.278 0 0 1 10.89-20.637l-.001.001a307.318 307.318 0 0 1 12.413-19.761c7.613-.576 15.42-.876 23.31-.876H128c7.926 0 15.743.303 23.354.883a329.357 329.357 0 0 1 12.335 19.695a358.489 358.489 0 0 1 11.036 20.54a329.472 329.472 0 0 1-11 20.722Zm22.56-122.124c8.572 4.944 11.906 24.881 6.52 51.026c-.344 1.668-.73 3.367-1.15 5.09c-10.622-2.452-22.155-4.275-34.23-5.408c-7.034-10.017-14.323-19.124-21.64-27.008a160.789 160.789 0 0 1 5.888-5.4c18.9-16.447 36.564-22.941 44.612-18.3ZM128 90.808c12.625 0 22.86 10.235 22.86 22.86s-10.235 22.86-22.86 22.86s-22.86-10.235-22.86-22.86s10.235-22.86 22.86-22.86Z"></path></svg>
+</file>
+
+<file path="frontend/src/assets/vite.svg">
+<svg xmlns="http://www.w3.org/2000/svg" width="77" height="47" fill="none" aria-labelledby="vite-logo-title" viewBox="0 0 77 47"><title id="vite-logo-title">Vite</title><style>.parenthesis{fill:#000}@media (prefers-color-scheme:dark){.parenthesis{fill:#fff}}</style><path fill="#9135ff" d="M40.151 45.71c-.663.844-2.02.374-2.02-.699V34.708a2.26 2.26 0 0 0-2.262-2.262H24.493c-.92 0-1.457-1.04-.92-1.788l7.479-10.471c1.07-1.498 0-3.578-1.842-3.578H15.443c-.92 0-1.456-1.04-.92-1.788l9.696-13.576c.213-.297.556-.474.92-.474h28.894c.92 0 1.456 1.04.92 1.788l-7.48 10.472c-1.07 1.497 0 3.578 1.842 3.578h11.376c.944 0 1.474 1.087.89 1.83L40.153 45.712z"/><mask id="a" width="48" height="47" x="14" y="0" maskUnits="userSpaceOnUse" style="mask-type:alpha"><path fill="#000" d="M40.047 45.71c-.663.843-2.02.374-2.02-.699V34.708a2.26 2.26 0 0 0-2.262-2.262H24.389c-.92 0-1.457-1.04-.92-1.788l7.479-10.472c1.07-1.497 0-3.578-1.842-3.578H15.34c-.92 0-1.456-1.04-.92-1.788l9.696-13.575c.213-.297.556-.474.92-.474H53.93c.92 0 1.456 1.04.92 1.788L47.37 13.03c-1.07 1.498 0 3.578 1.842 3.578h11.376c.944 0 1.474 1.088.89 1.831L40.049 45.712z"/></mask><g mask="url(#a)"><g filter="url(#b)"><ellipse cx="5.508" cy="14.704" fill="#eee6ff" rx="5.508" ry="14.704" transform="rotate(269.814 20.96 11.29)scale(-1 1)"/></g><g filter="url(#c)"><ellipse cx="10.399" cy="29.851" fill="#eee6ff" rx="10.399" ry="29.851" transform="rotate(89.814 -16.902 -8.275)scale(1 -1)"/></g><g filter="url(#d)"><ellipse cx="5.508" cy="30.487" fill="#8900ff" rx="5.508" ry="30.487" transform="rotate(89.814 -19.197 -7.127)scale(1 -1)"/></g><g filter="url(#e)"><ellipse cx="5.508" cy="30.599" fill="#8900ff" rx="5.508" ry="30.599" transform="rotate(89.814 -25.928 4.177)scale(1 -1)"/></g><g filter="url(#f)"><ellipse cx="5.508" cy="30.599" fill="#8900ff" rx="5.508" ry="30.599" transform="rotate(89.814 -25.738 5.52)scale(1 -1)"/></g><g filter="url(#g)"><ellipse cx="14.072" cy="22.078" fill="#eee6ff" rx="14.072" ry="22.078" transform="rotate(93.35 31.245 55.578)scale(-1 1)"/></g><g filter="url(#h)"><ellipse cx="3.47" cy="21.501" fill="#8900ff" rx="3.47" ry="21.501" transform="rotate(89.009 35.419 55.202)scale(-1 1)"/></g><g filter="url(#i)"><ellipse cx="3.47" cy="21.501" fill="#8900ff" rx="3.47" ry="21.501" transform="rotate(89.009 35.419 55.202)scale(-1 1)"/></g><g filter="url(#j)"><ellipse cx="14.592" cy="9.743" fill="#8900ff" rx="4.407" ry="29.108" transform="rotate(39.51 14.592 9.743)"/></g><g filter="url(#k)"><ellipse cx="61.728" cy="-5.321" fill="#8900ff" rx="4.407" ry="29.108" transform="rotate(37.892 61.728 -5.32)"/></g><g filter="url(#l)"><ellipse cx="55.618" cy="7.104" fill="#00c2ff" rx="5.971" ry="9.665" transform="rotate(37.892 55.618 7.104)"/></g><g filter="url(#m)"><ellipse cx="12.326" cy="39.103" fill="#8900ff" rx="4.407" ry="29.108" transform="rotate(37.892 12.326 39.103)"/></g><g filter="url(#n)"><ellipse cx="12.326" cy="39.103" fill="#8900ff" rx="4.407" ry="29.108" transform="rotate(37.892 12.326 39.103)"/></g><g filter="url(#o)"><ellipse cx="49.857" cy="30.678" fill="#8900ff" rx="4.407" ry="29.108" transform="rotate(37.892 49.857 30.678)"/></g><g filter="url(#p)"><ellipse cx="52.623" cy="33.171" fill="#00c2ff" rx="5.971" ry="15.297" transform="rotate(37.892 52.623 33.17)"/></g></g><path d="M6.919 0c-9.198 13.166-9.252 33.575 0 46.789h6.215c-9.25-13.214-9.196-33.623 0-46.789zm62.424 0h-6.215c9.198 13.166 9.252 33.575 0 46.789h6.215c9.25-13.214 9.196-33.623 0-46.789" class="parenthesis"/><defs><filter id="b" width="60.045" height="41.654" x="-5.564" y="16.92" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="7.659"/></filter><filter id="c" width="90.34" height="51.437" x="-40.407" y="-6.762" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="7.659"/></filter><filter id="d" width="79.355" height="29.4" x="-35.435" y="2.801" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="e" width="79.579" height="29.4" x="-30.84" y="20.8" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="f" width="79.579" height="29.4" x="-29.307" y="21.949" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="g" width="74.749" height="58.852" x="29.961" y="-17.13" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="7.659"/></filter><filter id="h" width="61.377" height="25.362" x="37.754" y="3.055" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="i" width="61.377" height="25.362" x="37.754" y="3.055" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="j" width="56.045" height="63.649" x="-13.43" y="-22.082" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="k" width="54.814" height="64.646" x="34.321" y="-37.644" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="l" width="33.541" height="35.313" x="38.847" y="-10.552" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="m" width="54.814" height="64.646" x="-15.081" y="6.78" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="n" width="54.814" height="64.646" x="-15.081" y="6.78" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="o" width="54.814" height="64.646" x="22.45" y="-1.645" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="p" width="39.409" height="43.623" x="32.919" y="11.36" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter></defs></svg>
+</file>
+
+<file path="frontend/src/main.tsx">
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import './index.css'
+import App from './App.tsx'
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+)
+</file>
+
+<file path="frontend/.dockerignore">
+node_modules/
+dist/
+dist-ssr/
+.git/
+.env
+.env.*
+!.env.example
+*.log
+npm-debug.log*
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+</file>
+
+<file path="frontend/.gitignore">
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+</file>
+
+<file path="frontend/eslint.config.js">
+import js from '@eslint/js'
+import globals from 'globals'
+import reactHooks from 'eslint-plugin-react-hooks'
+import reactRefresh from 'eslint-plugin-react-refresh'
+import tseslint from 'typescript-eslint'
+import { defineConfig, globalIgnores } from 'eslint/config'
+
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      js.configs.recommended,
+      tseslint.configs.recommended,
+      reactHooks.configs.flat.recommended,
+      reactRefresh.configs.vite,
+    ],
+    languageOptions: {
+      globals: globals.browser,
+    },
+  },
+])
+</file>
+
+<file path="frontend/index.html">
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>frontend</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+</file>
+
+<file path="frontend/package.json">
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "eslint": "^10.14.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.7",
+    "globals": "^17.13.0",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.72.1",
+    "vite": "^8.3.6"
+  }
+}
+</file>
+
+<file path="frontend/README.md">
+# React + TypeScript + Vite
+
+This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+
+Currently, two official plugins are available:
+
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+
+## React Compiler
+
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+
+## Expanding the ESLint configuration
+
+If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+
+```js
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      // Other configs...
+
+      // Remove tseslint.configs.recommended and replace with this
+      tseslint.configs.recommendedTypeChecked,
+      // Alternatively, use this for stricter rules
+      tseslint.configs.strictTypeChecked,
+      // Optionally, add this for stylistic rules
+      tseslint.configs.stylisticTypeChecked,
+
+      // Other configs...
+    ],
+    languageOptions: {
+      parserOptions: {
+        project: ['./tsconfig.node.json', './tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+      // other options...
+    },
+  },
+])
+
+```
+
+You can also install [eslint-plugin-react-x](https://npmx.dev/package/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://npmx.dev/package/eslint-plugin-react-dom) for React-specific lint rules:
+
+```js
+// eslint.config.js
+import reactX from 'eslint-plugin-react-x'
+import reactDom from 'eslint-plugin-react-dom'
+
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      // Other configs...
+      // Enable lint rules for React
+      reactX.configs['recommended-typescript'],
+      // Enable lint rules for React DOM
+      reactDom.configs.recommended,
+    ],
+    languageOptions: {
+      parserOptions: {
+        project: ['./tsconfig.node.json', './tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+      // other options...
+    },
+  },
+])
+
+```
+</file>
+
+<file path="frontend/tsconfig.app.json">
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "esnext",
+    "types": ["vite/client"],
+    "allowArbitraryExtensions": true,
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Linting */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src"]
+}
+</file>
+
+<file path="frontend/tsconfig.json">
+{
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.node.json" }
+  ]
+}
+</file>
+
+<file path="frontend/tsconfig.node.json">
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "module": "nodenext",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    /* Linting */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["vite.config.ts"]
+}
+</file>
+
+<file path="frontend/vite.config.ts">
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 5174,
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:8002',
+        changeOrigin: true,
+      },
+    },
+  },
+})
+</file>
+
+<file path=".dockerignore">
+# Git
+.git/
+.gitignore
+
+# Python environments and cache
+**/.venv/
+**/venv/
+**/env/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.coverage
+**/htmlcov/
+
+# Node dependencies and build output
+**/node_modules/
+**/dist/
+**/dist-ssr/
+
+# Environment files and secrets
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+
+# Test and temporary files
+**/selenium_artifacts/
+**/.pytest_cache/
+*.log
+*.tmp
+
+# Editor and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Repomix output
+repomix-output.xml
+</file>
+
+<file path=".gitignore">
+# Python environments
+.venv/
+venv/
+env/
+
+# Python cache and test files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node dependencies and builds
+node_modules/
+dist/
+dist-ssr/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# IDE settings
+.vscode/
+.idea/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+</file>
+
+<file path=".repomixignore">
+# Git metadata
+.git/
+
+# Python environments and caches
+**/.venv/
+**/venv/
+**/env/
+**/__pycache__/
+**/.pytest_cache/
+**/.coverage
+**/htmlcov/
+
+# Node dependencies and build output
+**/node_modules/
+**/dist/
+**/dist-ssr/
+
+# Environment files and secrets
+**/.env
+**/.env.*
+!**/.env.example
+
+# Logs and temporary files
+**/*.log
+**/*.tmp
+**/*.bak
+
+# Repomix output itself
+repomix-output.xml
+</file>
+
+<file path="backend/app/api/routes/leads.py">
+from fastapi import APIRouter, HTTPException
+
+from app.models.api import (
+    PrioritizationRequest,
+    PrioritizationResponse,
+)
+
+from app.services.workflow_service import WorkflowService
+from app.services.audit_service import AuditService
+from app.data.seed_leads import get_seed_scenarios
+
+router = APIRouter(
+    prefix="/api/leads",
+    tags=["Lead Prioritization"],
+)
+
+
+def build_workflow_response(context, scenario=None):
+    audit_record = None
+
+    if context.audit_reference:
+        record = AuditService.get(context.audit_reference)
+
+        if record:
+            audit_record = record.model_dump(mode="json")
+
+    response = {
+        "workflow_id": context.workflow_id,
+        "lead_id": context.lead_record.lead_id,
+        "recommendation": context.final_recommendation or {},
+        "explanation": context.explanation,
+        "audit_reference": context.audit_reference,
+        "workflow_context": context.model_dump(mode="json"),
+        "audit_record": audit_record,
+        "errors": context.errors,
+    }
+
+    if scenario is not None:
+        response["scenario"] = scenario
+
+    return response
+
+
+@router.post(
+    "/prioritize",
+    response_model=PrioritizationResponse,
+)
+def prioritize_lead(
+    request: PrioritizationRequest,
+):
+    try:
+        context = WorkflowService.execute(
+            lead_record=request.lead,
+            engagement_events=request.engagement_events,
+        )
+
+        return PrioritizationResponse(
+            **build_workflow_response(context)
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Lead prioritization failed: {str(exc)}",
+        )
+
+
+@router.get("/scenarios")
+def list_scenarios():
+    scenarios = get_seed_scenarios()
+
+    return {
+        name: {
+            "description": data["description"],
+            "lead_id": data["lead"].lead_id,
+        }
+        for name, data in scenarios.items()
+    }
+
+
+@router.post("/scenarios/{scenario_name}/run")
+def run_scenario(scenario_name: str):
+    scenarios = get_seed_scenarios()
+
+    if scenario_name not in scenarios:
+        raise HTTPException(
+            status_code=404,
+            detail="Scenario not found.",
+        )
+
+    scenario = scenarios[scenario_name]
+
+    context = WorkflowService.execute(
+        lead_record=scenario["lead"],
+        engagement_events=scenario["engagement_events"],
+    )
+
+    return build_workflow_response(
+        context,
+        scenario=scenario_name,
+    )
+</file>
+
+<file path="backend/app/models/api.py">
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
+
+from app.models.lead import LeadRecord, EngagementEvent
+
+
+class PrioritizationRequest(BaseModel):
+    lead: LeadRecord
+    engagement_events: List[EngagementEvent] = Field(
+        default_factory=list
+    )
+
+
+class PrioritizationResponse(BaseModel):
+    workflow_id: str
+    lead_id: str
+
+    recommendation: Dict[str, Any]
+
+    explanation: Optional[Dict[str, Any]] = None
+
+    audit_reference: Optional[str] = None
+
+    workflow_context: Dict[str, Any] = Field(
+        default_factory=dict
+    )
+
+    audit_record: Optional[Dict[str, Any]] = None
+
+    errors: List[str] = Field(
+        default_factory=list
+    )
+</file>
+
+<file path="backend/app/models/audit.py">
+from datetime import datetime
+from typing import Any, Dict, List
+
+from pydantic import BaseModel, Field
+
+
+class AuditRecord(BaseModel):
+    audit_reference: str
+    workflow_id: str
+    timestamp: datetime
+    lead_id: str
+
+    agent_sequence: List[str] = Field(
+        default_factory=list
+    )
+
+    agent_outputs: Dict[str, Any] = Field(
+        default_factory=dict
+    )
+
+    triggered_rules: List[str] = Field(
+        default_factory=list
+    )
+
+    final_recommendation: Dict[str, Any] = Field(
+        default_factory=dict
+    )
+
+    errors: List[str] = Field(
+        default_factory=list
+    )
+
+    execution_trace: List[Dict[str, str]] = Field(
+        default_factory=list
+    )
+</file>
+
+<file path="backend/app/models/workflow.py">
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+from uuid import uuid4
+
+from pydantic import BaseModel, Field
+
+from app.models.lead import EngagementEvent, LeadRecord
+
+
+class WorkflowContext(BaseModel):
+    workflow_id: str = Field(
+        default_factory=lambda: str(uuid4())
+    )
+
+    started_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+    lead_record: LeadRecord
+    engagement_events: List[EngagementEvent] = Field(
+        default_factory=list
+    )
+
+    validated_lead: Optional[Dict[str, Any]] = None
+
+    recency_score: Optional[float] = None
+    engagement_score: Optional[float] = None
+    fit_score: Optional[float] = None
+
+    sla_flags: List[str] = Field(default_factory=list)
+
+    agent_outputs: Dict[str, Any] = Field(
+        default_factory=dict
+    )
+
+    final_recommendation: Optional[Dict[str, Any]] = None
+    explanation: Optional[Dict[str, Any]] = None
+    audit_reference: Optional[str] = None
+
+    errors: List[str] = Field(default_factory=list)
+    execution_trace: List[Dict[str, str]] = Field(
+        default_factory=list
+    )
+</file>
+
+<file path="backend/app/services/audit_service.py">
+from datetime import datetime, timezone
+from uuid import uuid4
+
+from app.models.audit import AuditRecord
+from app.models.workflow import WorkflowContext
+
+
+class AuditService:
+
+    # In-memory audit storage for the MVP.
+    audit_store: dict[str, AuditRecord] = {}
+
+    @classmethod
+    def record(cls, context: WorkflowContext) -> AuditRecord:
+
+        recommendation = context.final_recommendation or {}
+
+        triggered_rules = recommendation.get(
+            "triggered_rules",
+            [],
+        )
+
+        audit_reference = f"AUD-{uuid4().hex[:12].upper()}"
+
+        record = AuditRecord(
+            audit_reference=audit_reference,
+            workflow_id=context.workflow_id,
+            timestamp=datetime.now(timezone.utc),
+            lead_id=context.lead_record.lead_id,
+            agent_sequence=list(context.agent_outputs.keys()),
+            agent_outputs=context.agent_outputs.copy(),
+            triggered_rules=triggered_rules,
+            final_recommendation=recommendation.copy(),
+            errors=list(context.errors),
+            execution_trace=[
+                item.copy() for item in context.execution_trace
+            ],
+        )
+
+        cls.audit_store[audit_reference] = record
+
+        context.audit_reference = audit_reference
+
+        return record
+
+    @classmethod
+    def get(cls, audit_reference: str) -> AuditRecord | None:
+        return cls.audit_store.get(audit_reference)
+</file>
+
+<file path="backend/app/services/workflow_service.py">
+from typing import List
+
+from app.models.lead import EngagementEvent, LeadRecord
+from app.models.workflow import WorkflowContext
+from app.services.workflow_graph import build_workflow_graph
+
+
+class WorkflowService:
+
+    @staticmethod
+    def execute(
+        lead_record: LeadRecord,
+        engagement_events: List[EngagementEvent] | None = None,
+    ) -> WorkflowContext:
+
+        workflow = build_workflow_graph()
+
+        result = workflow.invoke({
+            "lead_record": lead_record,
+            "engagement_events": engagement_events or [],
+        })
+
+        return result["context"]
+</file>
+
+<file path="frontend/src/index.css">
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+#root {
+  width: 100%;
+  min-height: 100vh;
+}
+</file>
+
+<file path="frontend/Dockerfile">
+# Stage 1: Build the React application
+FROM node:24-alpine AS builder
+
+WORKDIR /app
+
+COPY frontend/package*.json ./
+
+RUN npm ci
+
+COPY frontend/ .
+
+RUN npm run build
+
+# Stage 2: Serve the production build
+FROM nginx:alpine
+
+ENV NGINX_ENVSUBST_FILTER="^BACKEND_URL$"
+
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+COPY frontend/nginx.conf /etc/nginx/templates/default.conf.template
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]
+</file>
+
+<file path="backend/Dockerfile">
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+COPY backend/requirements.txt .
+
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
+
+COPY backend/app ./app
+
+EXPOSE 8002
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]
+</file>
+
+<file path="backend/requirements.txt">
+fastapi
+uvicorn[standard]
+pydantic
+pytest
+httpx
+langgraph==1.2.20
+google-genai
+python-dotenv
+</file>
+
+<file path="docker-compose.yml">
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: aa007-backend
+    env_file:
+      - ./backend/.env
+    expose:
+      - "8002"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/api/assistant/health', timeout=5)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: aa007-frontend
+    environment:
+      BACKEND_URL: http://backend:8002
+    ports:
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+</file>
+
+<file path="backend/app/services/workflow_graph.py">
+from langgraph.graph import END, START, StateGraph
+
+from app.models.workflow import WorkflowContext
+from app.services.workflow_state import WorkflowState
+
+from app.services.context_builder import ContextBuilder
+from app.services.explanation_service import ExplanationService
+from app.services.gemini_explainer import GeminiExplainer
+from app.services.audit_service import AuditService
+
+from app.agents.lead_intake_agent import LeadIntakeAgent
+from app.agents.recency_agent import RecencyAgent
+from app.agents.engagement_agent import EngagementAgent
+from app.agents.fit_sla_agent import FitSLAAgent
+from app.agents.lead_priority_agent import LeadPriorityAgent
+
+
+def add_trace(
+    context: WorkflowContext,
+    node: str,
+    status: str,
+) -> None:
+    context.execution_trace.append({
+        "node": node,
+        "status": status,
+    })
+
+
+def build_context_node(state: WorkflowState) -> dict:
+    context = ContextBuilder.build(
+        state["lead_record"],
+        state.get("engagement_events", []),
+    )
+
+    add_trace(context, "build_context", "completed")
+
+    return {"context": context}
+
+
+def lead_intake_node(state: WorkflowState) -> dict:
+    context = state["context"]
+
+    try:
+        intake_result = LeadIntakeAgent.run(context)
+
+        if intake_result.status == "invalid":
+            context.final_recommendation = {
+                "action": "REQUEST_DATA",
+                "priority_score": 0,
+                "triggered_rules": [
+                    "MISSING_MANDATORY_DATA"
+                ],
+                "reasons": intake_result.errors,
+            }
+
+            add_trace(context, "lead_intake", "completed")
+
+            return {
+                "context": context,
+                "intake_valid": False,
+                "execution_failed": False,
+            }
+
+        add_trace(context, "lead_intake", "completed")
+
+        return {
+            "context": context,
+            "intake_valid": True,
+            "execution_failed": False,
+        }
+
+    except Exception as exc:
+        context.errors.append(str(exc))
+        add_trace(context, "lead_intake", "failed")
+
+        return {
+            "context": context,
+            "intake_valid": False,
+            "execution_failed": True,
+        }
+
+
+def route_after_intake(state: WorkflowState) -> str:
+    context = state["context"]
+
+    if state.get("execution_failed", False):
+        route = "workflow_error"
+        condition = "INTAKE_EXECUTION_FAILED"
+    elif not state.get("intake_valid", False):
+        route = "request_data"
+        condition = "MISSING_MANDATORY_DATA"
+    else:
+        route = "recency"
+        condition = "INTAKE_VALID"
+
+    context.execution_trace.append({
+        "node": "intake_router",
+        "status": "selected",
+        "route": route,
+        "condition": condition,
+    })
+
+    return route
+
+
+def run_agent_node(
+    state: WorkflowState,
+    node_name: str,
+    agent,
+) -> dict:
+    context = state["context"]
+
+    if not state.get("intake_valid", False):
+        add_trace(context, node_name, "skipped")
+        return {"context": context}
+
+    if state.get("execution_failed", False):
+        add_trace(context, node_name, "skipped")
+        return {"context": context}
+
+    try:
+        agent.run(context)
+        add_trace(context, node_name, "completed")
+
+        return {"context": context}
+
+    except Exception as exc:
+        context.errors.append(str(exc))
+        add_trace(context, node_name, "failed")
+
+        return {
+            "context": context,
+            "execution_failed": True,
+        }
+
+
+def recency_node(state: WorkflowState) -> dict:
+    return run_agent_node(
+        state,
+        "recency",
+        RecencyAgent,
+    )
+
+
+def engagement_node(state: WorkflowState) -> dict:
+    return run_agent_node(
+        state,
+        "engagement",
+        EngagementAgent,
+    )
+
+
+def fit_sla_node(state: WorkflowState) -> dict:
+    return run_agent_node(
+        state,
+        "fit_sla",
+        FitSLAAgent,
+    )
+
+
+def priority_decision_node(state: WorkflowState) -> dict:
+    return run_agent_node(
+        state,
+        "priority_decision",
+        LeadPriorityAgent,
+    )
+
+
+def route_after_priority(state: WorkflowState) -> str:
+    context = state["context"]
+
+    if state.get("execution_failed", False):
+        route = "workflow_error"
+        condition = "AGENT_EXECUTION_FAILED"
+    else:
+        recommendation = context.final_recommendation or {}
+        triggered_rules = recommendation.get(
+            "triggered_rules", []
+        )
+
+        if "OVERDUE_FOLLOW_UP" in triggered_rules:
+            route = "overdue_follow_up"
+            condition = "OVERDUE_FOLLOW_UP"
+        elif "HIGH_PRIORITY_SCORE" in triggered_rules:
+            route = "high_priority"
+            condition = "HIGH_PRIORITY_SCORE"
+        elif "MODERATE_PRIORITY_SCORE" in triggered_rules:
+            route = "follow_up_soon"
+            condition = "MODERATE_PRIORITY_SCORE"
+        elif "LOW_PRIORITY_SCORE" in triggered_rules:
+            route = "nurture"
+            condition = "LOW_PRIORITY_SCORE"
+        else:
+            route = "workflow_error"
+            condition = "PRIORITY_ROUTE_NOT_IDENTIFIED"
+
+    context.execution_trace.append({
+        "node": "priority_router",
+        "status": "selected",
+        "route": route,
+        "condition": condition,
+    })
+
+    return route
+
+
+def route_node(
+    state: WorkflowState,
+    node_name: str,
+) -> dict:
+    context = state["context"]
+    add_trace(context, node_name, "completed")
+    return {"context": context}
+
+
+def request_data_node(state: WorkflowState) -> dict:
+    return route_node(state, "request_data")
+
+
+def overdue_follow_up_node(state: WorkflowState) -> dict:
+    return route_node(state, "overdue_follow_up")
+
+
+def high_priority_node(state: WorkflowState) -> dict:
+    return route_node(state, "high_priority")
+
+
+def follow_up_soon_node(state: WorkflowState) -> dict:
+    return route_node(state, "follow_up_soon")
+
+
+def nurture_node(state: WorkflowState) -> dict:
+    return route_node(state, "nurture")
+
+
+def workflow_error_node(state: WorkflowState) -> dict:
+    return route_node(state, "workflow_error")
+
+
+def build_explanation_node(state: WorkflowState) -> dict:
+    context = state["context"]
+
+    ExplanationService.build(context)
+    add_trace(context, "build_explanation", "completed")
+
+    return {"context": context}
+
+
+def gemini_explanation_node(state: WorkflowState) -> dict:
+    context = state["context"]
+
+    result = GeminiExplainer.enhance(context)
+
+    context.explanation["summary"] = result["summary"]
+
+    context.execution_trace.append({
+        "node": "gemini_explanation",
+        "status": result["status"],
+        "provider": result["provider"],
+        "model": result["model"],
+        "reason": result["reason"],
+    })
+
+    return {"context": context}
+
+def explanation_audit_node(state: WorkflowState) -> dict:
+    context = state["context"]
+
+    add_trace(context, "explanation_audit", "completed")
+    AuditService.record(context)
+
+    return {"context": context}
+
+def build_workflow_graph():
+    graph = StateGraph(WorkflowState)
+
+    graph.add_node("build_context", build_context_node)
+    graph.add_node("lead_intake", lead_intake_node)
+
+    graph.add_node("recency", recency_node)
+    graph.add_node("engagement", engagement_node)
+    graph.add_node("fit_sla", fit_sla_node)
+    graph.add_node("priority_decision", priority_decision_node)
+
+    graph.add_node("request_data", request_data_node)
+    graph.add_node("overdue_follow_up", overdue_follow_up_node)
+    graph.add_node("high_priority", high_priority_node)
+    graph.add_node("follow_up_soon", follow_up_soon_node)
+    graph.add_node("nurture", nurture_node)
+    graph.add_node("workflow_error", workflow_error_node)
+
+    graph.add_node("build_explanation", build_explanation_node)
+    graph.add_node("gemini_explanation", gemini_explanation_node)
+    graph.add_node("explanation_audit", explanation_audit_node)
+
+    graph.add_edge(START, "build_context")
+    graph.add_edge("build_context", "lead_intake")
+
+    graph.add_conditional_edges(
+        "lead_intake",
+        route_after_intake,
+        {
+            "recency": "recency",
+            "request_data": "request_data",
+            "workflow_error": "workflow_error",
+        },
+    )
+
+    graph.add_edge("recency", "engagement")
+    graph.add_edge("engagement", "fit_sla")
+    graph.add_edge("fit_sla", "priority_decision")
+
+    graph.add_conditional_edges(
+        "priority_decision",
+        route_after_priority,
+        {
+            "overdue_follow_up": "overdue_follow_up",
+            "high_priority": "high_priority",
+            "follow_up_soon": "follow_up_soon",
+            "nurture": "nurture",
+            "workflow_error": "workflow_error",
+        },
+    )
+
+    graph.add_edge("request_data", "build_explanation")
+    graph.add_edge("overdue_follow_up", "build_explanation")
+    graph.add_edge("high_priority", "build_explanation")
+    graph.add_edge("follow_up_soon", "build_explanation")
+    graph.add_edge("nurture", "build_explanation")
+    graph.add_edge("workflow_error", "build_explanation")
+
+    graph.add_edge("build_explanation", "gemini_explanation")
+    graph.add_edge("gemini_explanation", "explanation_audit")
+
+    graph.add_edge("explanation_audit", END)
+
+    return graph.compile()
+</file>
+
+<file path="frontend/src/App.css">
+:root {
+  --navy: #080f1e;
+  --surface: #111d32;
+  --surface-raised: #1a2945;
+  --surface-soft: #202f4b;
+  --gold: #d5a62e;
+  --gold-soft: rgba(213, 166, 46, 0.13);
+  --text: #f5f3ed;
+  --muted: #aab6c9;
+  --border: #34445f;
+  --success: #72c6a0;
+  --danger: #e58d8d;
+  --shadow: 0 16px 36px rgba(0, 0, 0, 0.2);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--navy);
+  color: var(--text);
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+button {
+  font: inherit;
+}
+
+.app-shell {
+  min-height: 100vh;
+  background: var(--navy);
+}
+
+.topbar {
+  min-height: 82px;
+  padding: 16px max(5%, calc((100% - 1320px) / 2));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  background: #060c18;
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+}
+
+.brand-mark {
+  width: 43px;
+  height: 43px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--gold);
+  color: var(--navy);
+  font-size: 23px;
+  font-weight: 850;
+}
+
+.brand h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: 21px;
+  letter-spacing: 2px;
+}
+
+.brand p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.system-status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 10px rgba(114, 198, 160, 0.4);
+}
+
+.page-content {
+  width: min(1320px, 90%);
+  margin: 0 auto;
+  padding: 42px 0 70px;
+}
+
+.page-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 24px;
+  margin-bottom: 30px;
+}
+
+.page-heading h2 {
+  max-width: 800px;
+  margin: 9px 0;
+  color: var(--text);
+  font-size: clamp(27px, 4vw, 38px);
+  line-height: 1.2;
+  letter-spacing: -1px;
+}
+
+.eyebrow {
+  margin: 0 0 9px;
+  color: var(--gold);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+}
+
+.subtitle,
+.section-heading p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.version-tag,
+.scenario-count {
+  flex-shrink: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--gold);
+  background: var(--surface);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1px;
+}
+
+.scenario-panel,
+.result-panel,
+.audit-panel {
+  margin-bottom: 22px;
+  padding: 25px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 22px;
+}
+
+.section-heading h3,
+.result-panel h3,
+.audit-panel h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 21px;
+  line-height: 1.35;
+}
+
+.scenario-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.scenario-card {
+  min-width: 0;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 9px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s, transform 0.2s;
+}
+
+.scenario-card:hover {
+  border-color: var(--gold);
+  transform: translateY(-2px);
+}
+
+.scenario-card.selected {
+  border-color: var(--gold);
+  background: var(--gold-soft);
+  box-shadow: inset 0 0 0 1px var(--gold);
+}
+
+.scenario-name {
+  color: var(--gold);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 1px;
+}
+
+.scenario-card strong {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.scenario-description {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.run-row {
+  margin-top: 23px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.run-button {
+  min-height: 45px;
+  padding: 0 19px;
+  display: inline-flex;
+  align-items: center;
+  gap: 16px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--gold);
+  color: #111827;
+  font-weight: 800;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.2s;
+}
+
+.run-button:hover:not(:disabled) {
+  background: #e6bd51;
+  transform: translateY(-1px);
+}
+
+.run-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.result-grid {
+  display: grid;
+  grid-template-columns: 1.5fr 1fr;
+  gap: 16px;
+}
+
+.recommendation-card,
+.score-card {
+  min-width: 0;
+  padding: 23px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface-raised);
+}
+
+.recommendation-card {
+  border-left: 4px solid var(--gold);
+}
+
+.metric-label {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1.2px;
+}
+
+.recommendation-card h2 {
+  margin: 13px 0 9px;
+  color: var(--gold);
+  font-size: clamp(23px, 3vw, 32px);
+}
+
+.recommendation-card p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.recommendation-context {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-left: 3px solid var(--gold);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.next-action-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  margin-top: 18px;
+  padding: 20px 23px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--gold);
+  border-radius: 11px;
+  background: var(--surface-raised);
+}
+
+.next-action-icon {
+  display: flex;
+  flex: 0 0 36px;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--gold);
+  color: #101a2c;
+  font-size: 22px;
+  font-weight: 800;
+}
+
+.next-action-card h4 {
+  margin: 8px 0;
+  color: var(--text);
+  font-size: 15px;
+}
+
+.next-action-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.score-value {
+  margin: 14px 0;
+  color: var(--gold);
+  font-size: 43px;
+  font-weight: 800;
+}
+
+.score-value small {
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.score-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 20px;
+  background: #34445f;
+}
+
+.score-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--gold);
+  transition: width 0.4s ease;
+}
+
+.completed-tag,
+.agent-status {
+  padding: 6px 10px;
+  border-radius: 20px;
+  background: rgba(114, 198, 160, 0.12);
+  color: var(--success);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.breakdown-section,
+.rules-section {
+  margin-top: 25px;
+}
+
+.result-panel h4,
+.audit-panel h4 {
+  margin: 23px 0 12px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.breakdown-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.breakdown-item,
+.context-item,
+.data-item {
+  min-width: 0;
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-raised);
+}
+
+.breakdown-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  text-transform: capitalize;
+}
+
+.breakdown-item strong {
+  color: var(--gold);
+}
+
+.rule-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
+.rule-tag {
+  padding: 7px 11px;
+  border: 1px solid rgba(213, 166, 46, 0.45);
+  border-radius: 6px;
+  background: var(--gold-soft);
+  color: var(--gold);
+  font-size: 11px;
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
+.input-grid,
+.context-grid,
+.context-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.context-meta {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 13px;
+}
+
+.data-item,
+.context-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.data-item span,
+.context-item span,
+.agent-detail-grid span,
+.audit-details span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.data-item strong,
+.context-item strong,
+.agent-detail-grid strong,
+.audit-details strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.context-item strong {
+  color: var(--gold);
+  font-size: 18px;
+}
+
+.event-list {
+  display: grid;
+  gap: 9px;
+}
+
+.event-row {
+  padding: 13px 15px;
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.5fr;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+
+.event-row strong {
+  color: var(--gold);
+  font-size: 13px;
+}
+
+.event-row span,
+.event-row small {
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.context-updates {
+  display: grid;
+  gap: 10px;
+}
+
+.context-updates div {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.context-updates span {
+  color: var(--gold);
+  font-weight: 800;
+}
+
+.context-note {
+  margin-top: 17px;
+}
+
+.muted-text {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.workflow-line {
+  display: grid;
+  gap: 15px;
+}
+
+.agent-card {
+  min-width: 0;
+  padding: 19px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-raised);
+}
+
+.agent-executed {
+  border-left: 3px solid var(--success);
+}
+
+.agent-skipped {
+  border-left: 3px solid #68758a;
+  opacity: 0.75;
+}
+
+.agent-card-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.agent-number {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--gold-soft);
+  color: var(--gold);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.agent-card-heading > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.agent-card-heading h4 {
+  margin: 2px 0 5px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.agent-card-heading p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.agent-skipped-status {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.agent-detail-grid {
+  margin: 17px 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.agent-detail-grid > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.agent-card h5 {
+  margin: 17px 0 9px;
+  color: var(--gold);
+  font-size: 11px;
+  letter-spacing: 0.5px;
+}
+
+.json-output {
+  max-width: 100%;
+  margin: 0;
+  padding: 16px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #080f1e;
+  color: #d6dfec;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.reason-list {
+  margin: 0;
+  padding-left: 21px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.explanation-text {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.75;
+}
+
+.audit-details {
+  margin-top: 22px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.audit-details > div {
+  min-width: 0;
+  padding: 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-raised);
+}
+
+.audit-details strong {
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+}
+
+.error-message {
+  margin: 18px 0;
+  padding: 13px 16px;
+  border: 1px solid rgba(229, 141, 141, 0.4);
+  border-radius: 8px;
+  background: rgba(229, 141, 141, 0.1);
+  color: var(--danger);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.validation-message {
+  margin: 18px 0;
+  padding: 13px 16px;
+  border: 1px solid rgba(213, 166, 46, 0.4);
+  border-radius: 8px;
+  background: rgba(213, 166, 46, 0.08);
+  color: #e7c66f;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.empty-state {
+  padding: 65px 25px;
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.empty-icon {
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 16px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--gold-soft);
+  color: var(--gold);
+  font-size: 25px;
+}
+
+.empty-state h3 {
+  color: var(--text);
+}
+
+.empty-state p {
+  max-width: 570px;
+  margin: 0 auto;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.footer {
+  min-height: 65px;
+  padding: 18px 5%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 15px;
+  border-top: 1px solid var(--border);
+  background: #060c18;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+@media (max-width: 850px) {
+  .page-content {
+    width: 92%;
+    padding-top: 30px;
+  }
+
+  .scenario-grid,
+  .input-grid,
+  .context-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .result-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .topbar {
+    padding: 14px 4%;
+  }
+
+  .system-status {
+    font-size: 10px;
+  }
+
+  .page-content {
+    width: 92%;
+    padding: 25px 0 45px;
+  }
+
+  .page-heading {
+    flex-direction: column;
+  }
+
+  .page-heading h2 {
+    font-size: 27px;
+  }
+
+  .scenario-panel,
+  .result-panel,
+  .audit-panel {
+    padding: 17px;
+    border-radius: 11px;
+  }
+
+  .scenario-grid,
+  .input-grid,
+  .context-grid,
+  .context-meta,
+  .breakdown-grid,
+  .audit-details {
+    grid-template-columns: 1fr;
+  }
+
+  .section-heading {
+    flex-direction: column;
+  }
+
+  .run-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .run-button {
+    justify-content: center;
+  }
+
+  .event-row {
+    grid-template-columns: 1fr;
+    gap: 5px;
+  }
+
+  .agent-card-heading {
+    flex-wrap: wrap;
+  }
+
+  .agent-card-heading > div {
+    flex-basis: calc(100% - 50px);
+  }
+
+  .agent-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+/* ========================================
+   PHASE 3.1 — EXPLAINABILITY & AUDIT
+======================================== */
+
+.explainability-panel {
+  margin: 22px 0;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.explainability-summary {
+  min-height: 82px;
+  padding: 20px 25px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  cursor: pointer;
+  list-style: none;
+  transition: background 0.2s ease;
+}
+
+.explainability-summary::-webkit-details-marker {
+  display: none;
+}
+
+.explainability-summary:hover {
+  background: var(--surface-raised);
+}
+
+.explainability-summary:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: -3px;
+}
+
+.explainability-title {
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.explainability-description {
+  flex: 1;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.explainability-indicator {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--gold-soft);
+  color: var(--gold);
+  font-size: 21px;
+  font-weight: 700;
+  transition: transform 0.2s ease;
+}
+
+.explainability-panel[open] .explainability-indicator {
+  transform: rotate(45deg);
+}
+
+.explainability-content {
+  padding: 0 20px 8px;
+  border-top: 1px solid var(--border);
+}
+
+.explainability-content .result-panel,
+.explainability-content .audit-panel {
+  margin: 18px 0;
+}
+
+@media (max-width: 560px) {
+  .explainability-summary {
+    padding: 17px;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .explainability-title {
+    flex: 1;
+    font-size: 14px;
+  }
+
+  .explainability-description {
+    flex-basis: calc(100% - 45px);
+    order: 3;
+    font-size: 11px;
+  }
+
+  .explainability-indicator {
+    order: 2;
+  }
+
+  .explainability-content {
+    padding: 0 10px 5px;
+  }
+}
+</file>
+
+<file path="frontend/nginx.conf">
+server {
+    listen 80;
+    server_name _;
+
+    resolver 8.8.8.8 1.1.1.1 valid=30s ipv6=off;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location /api/ {
+        proxy_pass ${BACKEND_URL};
+        proxy_ssl_server_name on;
+        proxy_http_version 1.1;
+        proxy_set_header Host $proxy_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /health {
+        access_log off;
+        default_type text/plain;
+        return 200 "healthy\n";
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+</file>
+
+<file path="backend/tests/test_workflow.py">
+import pytest
+from fastapi.testclient import TestClient
+
+from app.main import app
+from app.data.seed_leads import get_seed_scenarios
+from app.services.workflow_service import WorkflowService
+from app.services.audit_service import AuditService
+from app.models.lead import LeadRecord
+from app.services.gemini_explainer import GeminiExplainer
+from app.services.llm_config import LLMConfig
+
+client = TestClient(app)
+@pytest.fixture(autouse=True)
+def prevent_live_gemini_calls(monkeypatch):
+    def mock_enhance(context):
+        return {
+            "summary": context.explanation["summary"],
+            "status": "fallback",
+            "provider": "gemini",
+            "model": LLMConfig.MODEL,
+            "reason": "test_fallback",
+        }
+
+    monkeypatch.setattr(
+        GeminiExplainer,
+        "enhance",
+        staticmethod(mock_enhance),
+    )
+
+@pytest.mark.parametrize(
+    "scenario_name, expected_action, expected_score, expected_route, expected_condition",
+    [
+        (
+            "hot",
+            "FOLLOW_UP_NOW",
+            95,
+            "overdue_follow_up",
+            "OVERDUE_FOLLOW_UP",
+        ),
+        (
+            "warm",
+            "FOLLOW_UP_SOON",
+            65,
+            "follow_up_soon",
+            "MODERATE_PRIORITY_SCORE",
+        ),
+        (
+            "stale",
+            "NURTURE",
+            0,
+            "nurture",
+            "LOW_PRIORITY_SCORE",
+        ),
+    ],
+)
+def test_seed_scenario_workflow(
+    scenario_name,
+    expected_action,
+    expected_score,
+    expected_route,
+    expected_condition,
+):
+    scenarios = get_seed_scenarios()
+    scenario = scenarios[scenario_name]
+
+    context = WorkflowService.execute(
+        scenario["lead"],
+        scenario["engagement_events"],
+    )
+
+    assert context.final_recommendation["action"] == expected_action
+    assert context.final_recommendation["priority_score"] == expected_score
+
+    assert len(context.agent_outputs) == 5
+    assert context.explanation is not None
+    assert context.audit_reference is not None
+    audit_record = AuditService.get(context.audit_reference)
+    assert audit_record is not None
+    assert audit_record.execution_trace == context.execution_trace
+    gemini_audit_entry = next(
+        item
+        for item in audit_record.execution_trace
+        if item["node"] == "gemini_explanation"
+    )
+
+    assert gemini_audit_entry["status"] == "fallback"
+    assert gemini_audit_entry["provider"] == "gemini"
+    assert gemini_audit_entry["model"] == LLMConfig.MODEL
+    assert gemini_audit_entry["reason"] == "test_fallback"
+    assert any(
+        item["node"] == "intake_router"
+        and item.get("route") == "recency"
+        and item.get("condition") == "INTAKE_VALID"
+        for item in audit_record.execution_trace
+    )
+
+    assert any(
+        item["node"] == "priority_router"
+        and item.get("route") == expected_route
+        and item.get("condition") == expected_condition
+        for item in audit_record.execution_trace
+    )
+
+    assert audit_record.execution_trace[-1] == {
+        "node": "explanation_audit",
+        "status": "completed",
+    }
+
+    assert context.errors == []
+
+    actual_nodes = [
+        item["node"]
+        for item in context.execution_trace
+    ]
+
+    assert actual_nodes == [
+        "build_context",
+        "lead_intake",
+        "intake_router",
+        "recency",
+        "engagement",
+        "fit_sla",
+        "priority_decision",
+        "priority_router",
+        expected_route,
+        "build_explanation",
+        "gemini_explanation",
+        "explanation_audit",
+    ]
+    intake_route = next(
+        item
+        for item in context.execution_trace
+        if item["node"] == "intake_router"
+    )
+
+    assert intake_route["route"] == "recency"
+    assert intake_route["condition"] == "INTAKE_VALID"
+
+    priority_route = next(
+        item
+        for item in context.execution_trace
+        if item["node"] == "priority_router"
+    )
+
+    assert priority_route["route"] == expected_route
+    assert priority_route["condition"] == expected_condition
+
+    assert all(
+        item["status"] in ("completed", "selected", "fallback")
+        for item in context.execution_trace
+    )
+
+def test_scenario_listing_api():
+    response = client.get("/api/leads/scenarios")
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert set(data.keys()) == {"hot", "warm", "stale"}
+
+
+@pytest.mark.parametrize(
+    "scenario_name, expected_action",
+    [
+        ("hot", "FOLLOW_UP_NOW"),
+        ("warm", "FOLLOW_UP_SOON"),
+        ("stale", "NURTURE"),
+    ],
+)
+def test_scenario_execution_api(scenario_name, expected_action):
+    response = client.post(
+        f"/api/leads/scenarios/{scenario_name}/run"
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["recommendation"]["action"] == expected_action
+    assert data["explanation"] is not None
+    assert data["audit_reference"] is not None
+    assert data["errors"] == []
+
+
+def test_unknown_scenario_returns_404():
+    response = client.post(
+        "/api/leads/scenarios/unknown/run"
+    )
+
+    assert response.status_code == 404
+
+
+def test_missing_contact_returns_request_data():
+    lead = LeadRecord(
+        lead_id="LEAD-TEST-INVALID",
+        source="Website",
+        created_at="2026-11-08T10:00:00Z",
+        stage="New",
+        contact_available=False,
+    )
+
+    context = WorkflowService.execute(lead)
+
+    assert context.final_recommendation["action"] == "REQUEST_DATA"
+    assert context.explanation is not None
+    assert context.audit_reference is not None
+    assert context.errors
+
+    actual_trace = context.execution_trace
+
+    assert [
+        (item["node"], item["status"])
+        for item in actual_trace
+    ] == [
+        ("build_context", "completed"),
+        ("lead_intake", "completed"),
+        ("intake_router", "selected"),
+        ("request_data", "completed"),
+        ("build_explanation", "completed"),
+        ("gemini_explanation", "fallback"),
+        ("explanation_audit", "completed"),
+    ]
+    intake_route = next(
+        item
+        for item in actual_trace
+        if item["node"] == "intake_router"
+    )
+
+    assert intake_route["route"] == "request_data"
+    assert intake_route["condition"] == "MISSING_MANDATORY_DATA"
+
+    assert list(context.agent_outputs.keys()) == ["lead_intake"]
+
+def test_high_priority_score_uses_high_priority_route():
+    from datetime import datetime, timezone, timedelta
+
+    from app.models.lead import EngagementEvent
+
+    now = datetime.now(timezone.utc)
+
+    lead = LeadRecord(
+        lead_id="LEAD-TEST-HIGH",
+        source="Website",
+        created_at=now - timedelta(days=2),
+        last_contact_at=now - timedelta(days=1),
+        declared_need="Enterprise software",
+        stage="Qualified",
+        contact_available=True,
+        pending_follow_up=False,
+    )
+
+    events = [
+        EngagementEvent(
+            event_id=f"HIGH-E{i}",
+            event_type=event_type,
+            occurred_at=now - timedelta(hours=i),
+        )
+        for i, event_type in enumerate(
+            [
+                "inquiry",
+                "email_response",
+                "meeting_attended",
+                "follow_up_response",
+            ],
+            start=1,
+        )
+    ]
+
+    context = WorkflowService.execute(lead, events)
+
+    assert context.final_recommendation["action"] == "FOLLOW_UP_NOW"
+    assert context.final_recommendation["priority_score"] == 100
+    assert context.final_recommendation["triggered_rules"] == [
+        "HIGH_PRIORITY_SCORE"
+    ]
+
+    priority_route = next(
+        item
+        for item in context.execution_trace
+        if item["node"] == "priority_router"
+    )
+
+    assert priority_route["route"] == "high_priority"
+    assert priority_route["condition"] == "HIGH_PRIORITY_SCORE"
+
+    assert any(
+        item["node"] == "high_priority"
+        and item["status"] == "completed"
+        for item in context.execution_trace
+    )
+
+    assert context.explanation is not None
+    assert context.audit_reference is not None
+    assert context.errors == []
+    gemini_trace = next(
+        item
+        for item in context.execution_trace
+        if item["node"] == "gemini_explanation"
+    )
+
+    assert gemini_trace["status"] == "fallback"
+    assert gemini_trace["provider"] == "gemini"
+    assert gemini_trace["reason"] == "test_fallback"
+</file>
+
+<file path="frontend/src/App.tsx">
+import { useEffect, useState } from 'react'
+import './App.css'
+
+type Scenario = {
+  description: string
+  lead_id: string
+}
+
+type Scenarios = Record<string, Scenario>
+
+type AgentOutput = {
+  agent_name: string
+  status?: string
+  validated_lead?: Record<string, unknown> | null
+  errors?: string[]
+  score?: number
+  days_since_last_contact?: number | null
+  event_count?: number
+  recognized_events?: string[]
+  reason?: string
+  fit_score?: number
+  sla_flags?: string[]
+  priority_score?: number
+  action?: string
+  triggered_rules?: string[]
+  reasons?: string[]
+}
+
+type WorkflowContext = {
+  workflow_id: string
+  started_at: string
+  lead_record: Record<string, unknown>
+  engagement_events: Array<Record<string, unknown>>
+  validated_lead: Record<string, unknown> | null
+  recency_score: number | null
+  engagement_score: number | null
+  fit_score: number | null
+  sla_flags: string[]
+  agent_outputs: Record<string, AgentOutput>
+  final_recommendation: Recommendation | null
+  explanation: Record<string, unknown> | null
+  audit_reference: string | null
+  errors: string[]
+}
+
+type Recommendation = {
+  priority_score: number
+  action: string
+  triggered_rules: string[]
+  reasons: string[]
+}
+
+type AuditRecord = {
+  audit_reference: string
+  workflow_id: string
+  timestamp: string
+  lead_id: string
+  agent_sequence: string[]
+  agent_outputs: Record<string, AgentOutput>
+  triggered_rules: string[]
+  final_recommendation: Recommendation
+  execution_trace: Array<{
+    node: string
+    status: string
+    provider?: string
+    model?: string
+    reason?: string
+    route?: string
+    condition?: string
+  }>
+  errors: string[]
+}
+
+type WorkflowResult = {
+  workflow_id: string
+  scenario?: string
+  lead_id: string
+  recommendation: Recommendation
+  explanation: {
+    summary: string
+    executed_agents: string[]
+    score_breakdown: {
+      recency: number | null
+      engagement: number | null
+      fit: number | null
+    }
+    triggered_rules: string[]
+    reasons: string[]
+    limitations: string[]
+  }
+  audit_reference: string
+  workflow_context: WorkflowContext
+  audit_record: AuditRecord | null
+  errors: string[]
+}
+
+const agentDefinitions: Record<
+  string,
+  {
+    responsibility: string
+    input: string
+  }
+> = {
+  lead_intake: {
+    responsibility: 'Validates mandatory lead fields and normalizes lead information.',
+    input: 'Lead record',
+  },
+  recency: {
+    responsibility: 'Evaluates how recently the lead was contacted.',
+    input: 'Validated lead and last-contact date',
+  },
+  engagement: {
+    responsibility: 'Scores recognized business engagement events.',
+    input: 'Validated lead and engagement events',
+  },
+  fit_sla: {
+    responsibility: 'Evaluates declared business need and pending follow-up SLA.',
+    input: 'Validated lead and follow-up information',
+  },
+  lead_priority: {
+    responsibility: 'Combines agent scores and business rules into a recommendation.',
+    input: 'Recency, engagement, fit and SLA outputs',
+  },
+}
+
+const agentOrder = [
+  'lead_intake',
+  'recency',
+  'engagement',
+  'fit_sla',
+  'lead_priority',
+]
+
+const actionLabels: Record<string, string> = {
+  FOLLOW_UP_NOW: 'Follow Up Now',
+  FOLLOW_UP_SOON: 'Follow Up Soon',
+  NURTURE: 'Nurture',
+  REQUEST_DATA: 'Request Data',
+}
+
+const actionDescriptions: Record<string, string> = {
+  FOLLOW_UP_NOW:
+    'This lead needs prompt attention. Review the available evidence and arrange the next follow-up.',
+  FOLLOW_UP_SOON:
+    'This lead should remain in the active follow-up queue. Schedule the next contact soon.',
+  NURTURE:
+    'This lead is better suited to continued engagement. Keep it in the nurture process and review it later.',
+  REQUEST_DATA:
+    'Some mandatory lead information is missing. Complete the required information before prioritization can continue.',
+}
+
+const nextActions: Record<string, string> = {
+  FOLLOW_UP_NOW:
+    'Contact the lead as soon as practical. Review the declared need and agree on the next step.',
+  FOLLOW_UP_SOON:
+    'Schedule a follow-up within your team’s normal response window and keep the lead on the active list.',
+  NURTURE:
+    'Add the lead to the appropriate nurture queue and plan a future engagement review.',
+  REQUEST_DATA:
+    'Ask the responsible team member to provide the missing contact or lead information, then reassess.',
+}
+
+function formatValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') {
+    return 'Not provided'
+  }
+
+  if (typeof value === 'boolean') {
+    return value ? 'Yes' : 'No'
+  }
+
+  if (typeof value === 'object') {
+    return JSON.stringify(value, null, 2)
+  }
+
+  return String(value)
+}
+
+function formatDate(value: unknown): string {
+  if (!value || typeof value !== 'string') return 'Not provided'
+
+  const date = new Date(value)
+
+  if (Number.isNaN(date.getTime())) return value
+
+  return date.toLocaleString()
+}
+
+function App() {
+  const [scenarios, setScenarios] = useState<Scenarios>({})
+  const [selectedScenario, setSelectedScenario] = useState('hot')
+  const [result, setResult] = useState<WorkflowResult | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    async function loadScenarios() {
+      try {
+        const response = await fetch('/api/leads/scenarios')
+
+        if (!response.ok) {
+          throw new Error('Unable to load scenarios.')
+        }
+
+        const data: Scenarios = await response.json()
+        setScenarios(data)
+      } catch {
+        setError(
+          'Could not connect to the backend. Please check that the API server is running.',
+        )
+      }
+    }
+
+    loadScenarios()
+  }, [])
+
+  async function runScenario() {
+    setLoading(true)
+    setError('')
+    setResult(null)
+
+    try {
+      const response = await fetch(
+        `/api/leads/scenarios/${selectedScenario}/run`,
+        { method: 'POST' },
+      )
+
+      if (!response.ok) {
+        throw new Error('Scenario execution failed.')
+      }
+
+      const data: WorkflowResult = await response.json()
+      setResult(data)
+    } catch {
+      setError('Unable to execute the workflow. Please try again.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function runMissingContactTest() {
+    setLoading(true)
+    setError('')
+    setResult(null)
+
+    const now = new Date().toISOString()
+
+    const testPayload = {
+      lead: {
+        lead_id: 'LEAD-TEST-MISSING-001',
+        source: 'Website',
+        created_at: now,
+        last_contact_at: now,
+        declared_need: 'Airline booking assistance',
+        stage: 'New',
+        contact_available: false,
+        pending_follow_up: false,
+        follow_up_due_at: null,
+      },
+      engagement_events: [],
+    }
+
+    try {
+      const response = await fetch('/api/leads/prioritize', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(testPayload),
+      })
+
+      if (!response.ok) {
+        throw new Error('Missing-contact test failed.')
+      }
+
+      const data: WorkflowResult = await response.json()
+      setResult(data)
+    } catch {
+      setError(
+        'Unable to execute the missing-contact test. Please check the backend.',
+      )
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const context = result?.workflow_context
+  const executedOutputs = context?.agent_outputs ?? {}
+  const executedAgentKeys = Object.keys(executedOutputs)
+
+  const leadFields = [
+    ['Lead ID', 'lead_id'],
+    ['Source', 'source'],
+    ['Created At', 'created_at'],
+    ['Last Contact', 'last_contact_at'],
+    ['Declared Need', 'declared_need'],
+    ['Stage', 'stage'],
+    ['Contact Available', 'contact_available'],
+    ['Pending Follow-up', 'pending_follow_up'],
+    ['Follow-up Due', 'follow_up_due_at'],
+  ]
+
+  return (
+    <main className="app-shell">
+      <header className="topbar">
+        <div className="brand">
+          <div className="brand-mark">A</div>
+          <div>
+            <h1>APEX</h1>
+            <p>Lead Intelligence Platform</p>
+          </div>
+        </div>
+        <div className="system-status">
+          <span className="status-dot" />
+          Deterministic Engine
+        </div>
+      </header>
+
+      <section className="page-content">
+        <div className="page-heading">
+          <div>
+            <p className="eyebrow">SALES OPERATIONS / INTELLIGENCE</p>
+            <h2>Lead Follow-up Prioritization Intelligence</h2>
+            <p className="subtitle">
+              Transparent, evidence-based lead prioritization through a coordinated agent workflow.
+            </p>
+          </div>
+          <div className="version-tag">AA007 · PHASE 3</div>
+        </div>
+
+        <section className="scenario-panel">
+          <div className="section-heading">
+            <div>
+              <h3>Workflow Scenarios</h3>
+              <p>Select a sample lead to evaluate its follow-up priority.</p>
+            </div>
+            <span className="scenario-count">03 SCENARIOS</span>
+          </div>
+
+          <div className="scenario-grid">
+            {Object.entries(scenarios).map(([key, scenario]) => (
+              <button
+                key={key}
+                className={`scenario-card ${selectedScenario === key ? 'selected' : ''}`}
+                onClick={() => {
+                  setSelectedScenario(key)
+                  setResult(null)
+                  setError('')
+                }}
+              >
+                <span className="scenario-name">{key.toUpperCase()}</span>
+                <strong>{scenario.lead_id}</strong>
+                <span className="scenario-description">
+                  {scenario.description}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          <div className="run-row">
+            <span>Run the selected lead through the workflow.</span>
+            <button
+              className="run-button"
+              onClick={runScenario}
+              disabled={loading || !scenarios[selectedScenario]}
+            >
+              {loading ? 'Running workflow...' : 'Run Prioritization'}
+              <span>→</span>
+            </button>
+          </div>
+        </section>
+
+        <section className="scenario-panel">
+          <div className="section-heading">
+            <div>
+              <h3>Mandatory Data Validation Test</h3>
+              <p>
+                Test how the Lead Intake Agent handles a lead with missing contact information.
+              </p>
+            </div>
+            <span className="scenario-count">EDGE CASE</span>
+          </div>
+
+          <div className="run-row">
+            <span>
+              Test input: LEAD-TEST-MISSING-001 · Contact Available: No
+            </span>
+            <button
+              className="run-button"
+              onClick={runMissingContactTest}
+              disabled={loading}
+            >
+              {loading ? 'Running test...' : 'Run REQUEST_DATA Test'}
+              <span>→</span>
+            </button>
+          </div>
+        </section>
+
+        {error && <div className="error-message">{error}</div>}
+
+        {result && context && (
+          <>
+            {/* BUSINESS-FACING SECTION 1: LEAD INPUT */}
+
+            <section className="result-panel">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">BUSINESS INPUT</p>
+                  <h3>Lead Record & Engagement</h3>
+                  <p>The lead information used for this prioritization.</p>
+                </div>
+              </div>
+
+              <div className="input-grid">
+                {leadFields.map(([label, key]) => {
+                  const value = context.lead_record[key]
+                  const displayValue =
+                    key.endsWith('_at') ? formatDate(value) : formatValue(value)
+
+                  return (
+                    <div className="data-item" key={key}>
+                      <span>{label}</span>
+                      <strong>{displayValue}</strong>
+                    </div>
+                  )
+                })}
+              </div>
+
+              <h4>Engagement Events ({context.engagement_events.length})</h4>
+              {context.engagement_events.length > 0 ? (
+                <div className="event-list">
+                  {context.engagement_events.map((event, index) => (
+                    <div
+                      className="event-row"
+                      key={String(event.event_id ?? index)}
+                    >
+                      <strong>{formatValue(event.event_type)}</strong>
+                      <span>{formatValue(event.event_id)}</span>
+                      <small>{formatDate(event.occurred_at)}</small>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted-text">No engagement events supplied.</p>
+              )}
+            </section>
+
+            {/* BUSINESS-FACING SECTION 2: RECOMMENDATION */}
+
+            <section className="result-panel">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">WORKFLOW RESULT</p>
+                  <h3>Priority Recommendation</h3>
+                  <p>Recommended follow-up action based on the available lead evidence.</p>
+                </div>
+                <span className="completed-tag">COMPLETED</span>
+              </div>
+
+              <div className="result-grid">
+                <div className="recommendation-card">
+                  <span className="metric-label">RECOMMENDED ACTION</span>
+                  <h2>
+                    {actionLabels[result.recommendation.action] ||
+                      result.recommendation.action}
+                  </h2>
+                  <p>{result.recommendation.reasons.join(' ')}</p>
+                  <div className="recommendation-context">
+                    {actionDescriptions[result.recommendation.action] ||
+                      'Review the recommendation and supporting evidence.'}
+                  </div>
+                </div>
+
+                <div className="score-card">
+                  <span className="metric-label">PRIORITY SCORE</span>
+                  <div className="score-value">
+                    {result.recommendation.priority_score}
+                    <small>/100</small>
+                  </div>
+                  <div className="score-track">
+                    <div
+                      className="score-fill"
+                      style={{
+                        width: `${Math.min(
+                          result.recommendation.priority_score,
+                          100,
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="next-action-card">
+                <div className="next-action-icon">→</div>
+                <div>
+                  <span className="metric-label">SUGGESTED NEXT ACTION</span>
+                  <h4>
+                    {actionLabels[result.recommendation.action] || 'Review lead'}
+                  </h4>
+                  <p>
+                    {nextActions[result.recommendation.action] ||
+                      'Review the available lead information and determine the appropriate next step.'}
+                  </p>
+                </div>
+              </div>
+
+              {/* Keep validation feedback visible to business users. */}
+
+              {result.errors.length > 0 && (
+                <div
+                  className={
+                    result.recommendation.action === 'REQUEST_DATA'
+                      ? 'validation-message'
+                      : 'error-message'
+                  }
+                >
+                  {result.errors.join(', ')}
+                </div>
+              )}
+            </section>
+
+            {/* BUSINESS-FACING SECTION 3: DECISION EVIDENCE */}
+
+            <section className="result-panel">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">BUSINESS EVIDENCE</p>
+                  <h3>Rules, Scores & Evidence</h3>
+                  <p>Key factors supporting the recommendation.</p>
+                </div>
+              </div>
+
+              <h4>Score Breakdown</h4>
+              <div className="breakdown-grid">
+                {Object.entries(result.explanation.score_breakdown).map(
+                  ([name, score]) => (
+                    <div className="breakdown-item" key={name}>
+                      <span>{name}</span>
+                      <strong>{formatValue(score)}</strong>
+                    </div>
+                  ),
+                )}
+              </div>
+
+              <h4>Triggered Business Rules</h4>
+              <div className="rule-list">
+                {result.recommendation.triggered_rules.length > 0 ? (
+                  result.recommendation.triggered_rules.map((rule) => (
+                    <span className="rule-tag" key={rule}>
+                      {rule}
+                    </span>
+                  ))
+                ) : (
+                  <span className="muted-text">No rules recorded.</span>
+                )}
+              </div>
+
+              <h4>Decision Reasons</h4>
+              <ul className="reason-list">
+                {result.explanation.reasons.map((reason, index) => (
+                  <li key={index}>{reason}</li>
+                ))}
+              </ul>
+
+              <h4>Explanation</h4>
+              <p className="explanation-text">{result.explanation.summary}</p>
+
+              {result.explanation.limitations.length > 0 && (
+                <>
+                  <h4>Limitations</h4>
+                  <ul className="reason-list">
+                    {result.explanation.limitations.map((item, index) => (
+                      <li key={index}>{item}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </section>
+
+            {/* ADVANCED TECHNICAL DETAILS: CLOSED BY DEFAULT */}
+
+            <details className="explainability-panel">
+              <summary className="explainability-summary">
+                <span className="explainability-title">
+                  Explainability & Audit
+                </span>
+                <span className="explainability-description">
+                  Advanced technical details · Reviewer view
+                </span>
+                <span className="explainability-indicator" aria-hidden="true">
+                  +
+                </span>
+              </summary>
+
+              <div className="explainability-content">
+
+                {/* RUN-SCOPED SHARED WORKFLOW CONTEXT */}
+
+                <section className="result-panel">
+                  <div className="section-heading">
+                    <div>
+                      <p className="eyebrow">01 / SHARED CONTEXT</p>
+                      <h3>Run-Scoped Shared Workflow Context</h3>
+                      <p>
+                        A shared context created for this workflow run and updated as agents execute.
+                      </p>
+                    </div>
+                    <span className="scenario-count">RUN-SCOPED</span>
+                  </div>
+
+                  <div className="context-meta">
+                    <div className="data-item">
+                      <span>Workflow ID</span>
+                      <strong>{context.workflow_id}</strong>
+                    </div>
+                    <div className="data-item">
+                      <span>Started At</span>
+                      <strong>{formatDate(context.started_at)}</strong>
+                    </div>
+                  </div>
+
+                  <div className="context-grid">
+                    <div className="context-item">
+                      <span>Normalized Lead Snapshot</span>
+                      <strong>
+                        {context.validated_lead ? 'Available' : 'Not available'}
+                      </strong>
+                    </div>
+                    <div className="context-item">
+                      <span>Recency Score</span>
+                      <strong>{formatValue(context.recency_score)}</strong>
+                    </div>
+                    <div className="context-item">
+                      <span>Engagement Score</span>
+                      <strong>{formatValue(context.engagement_score)}</strong>
+                    </div>
+                    <div className="context-item">
+                      <span>Fit Score</span>
+                      <strong>{formatValue(context.fit_score)}</strong>
+                    </div>
+                    <div className="context-item">
+                      <span>Agent Outputs</span>
+                      <strong>{executedAgentKeys.length} recorded</strong>
+                    </div>
+                    <div className="context-item">
+                      <span>Workflow Errors</span>
+                      <strong>{context.errors.length}</strong>
+                    </div>
+                  </div>
+
+                  <h4>Execution Summary</h4>
+                  <div className="context-updates">
+                    <div>
+                      <span>01</span> Lead record and engagement events initialized
+                    </div>
+                    <div>
+                      <span>02</span>
+                      Lead Intake outcome: {context.agent_outputs.lead_intake?.status ?? 'Not recorded'}
+                    </div>
+                    <div>
+                      <span>03</span> {executedAgentKeys.length} agent output(s) recorded in shared context
+                    </div>
+                    <div>
+                      <span>04</span> Final recommendation: {context.final_recommendation?.action ?? 'Not available'}
+                    </div>
+                    <div>
+                      <span>05</span> Audit reference: {context.audit_reference ?? 'Not available'}
+                    </div>
+                  </div>
+
+                  <p className="muted-text context-note">
+                    This context belongs to one workflow execution. It is not permanent or long-term memory.
+                  </p>
+                </section>
+
+                {/* FIVE-AGENT EXECUTION TIMELINE */}
+
+                <section className="result-panel">
+                  <div className="section-heading">
+                    <div>
+                      <p className="eyebrow">02 / AGENT EXECUTION</p>
+                      <h3>Agent Workflow Timeline</h3>
+                      <p>Only agents with recorded outputs are shown as executed.</p>
+                    </div>
+                    <span className="scenario-count">
+                      {executedAgentKeys.length} EXECUTED
+                    </span>
+                  </div>
+
+                  <div className="workflow-line">
+                    {agentOrder.map((key, index) => {
+                      const output = executedOutputs[key]
+                      const definition = agentDefinitions[key]
+
+                      return (
+                        <article
+                          className={`agent-card ${output ? 'agent-executed' : 'agent-skipped'}`}
+                          key={key}
+                        >
+                          <div className="agent-card-heading">
+                            <span className="agent-number">
+                              {String(index + 1).padStart(2, '0')}
+                            </span>
+                            <div>
+                              <h4>{definition.responsibility.split('.')[0]}</h4>
+                              <p>{definition.responsibility}</p>
+                            </div>
+                            <span
+                              className={
+                                output ? 'agent-status' : 'agent-skipped-status'
+                              }
+                            >
+                              {output ? 'Executed' : 'Not executed'}
+                            </span>
+                          </div>
+
+                          <div className="agent-detail-grid">
+                            <div>
+                              <span>Important Input</span>
+                              <strong>{definition.input}</strong>
+                            </div>
+                            <div>
+                              <span>Output</span>
+                              {output ? (
+                                <strong>{output.agent_name}</strong>
+                              ) : (
+                                <strong>None recorded</strong>
+                              )}
+                            </div>
+                          </div>
+
+                          {output && (
+                            <>
+                              <h5>Structured Output</h5>
+                              <pre className="json-output">
+                                {JSON.stringify(output, null, 2)}
+                              </pre>
+                            </>
+                          )}
+                        </article>
+                      )
+                    })}
+                  </div>
+                </section>
+
+                {/* AUDIT TRAIL, EXECUTION TRACE AND GEMINI METADATA */}
+
+                <section className="audit-panel">
+                  <div>
+                    <p className="eyebrow">03 / AUDIT TRAIL</p>
+                    <h3>Workflow Traceability</h3>
+                    <p className="subtitle">
+                      Recorded execution details from the in-memory audit service.
+                    </p>
+                  </div>
+
+                  <div className="audit-details">
+                    <div>
+                      <span>Workflow ID</span>
+                      <strong>{result.workflow_id}</strong>
+                    </div>
+                    <div>
+                      <span>Audit Reference</span>
+                      <strong>{result.audit_reference}</strong>
+                    </div>
+                    <div>
+                      <span>Lead ID</span>
+                      <strong>{result.lead_id}</strong>
+                    </div>
+                    <div>
+                      <span>Audit Timestamp</span>
+                      <strong>
+                        {result.audit_record
+                          ? formatDate(result.audit_record.timestamp)
+                          : 'Not available'}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Recorded Agent Sequence</span>
+                      <strong>
+                        {result.audit_record?.agent_sequence.join(' → ') ||
+                          'No agents recorded'}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Audit Storage</span>
+                      <strong>In-memory · Process-local</strong>
+                    </div>
+                  </div>
+
+                  {result.audit_record && (
+                    <>
+                      <h4>Execution Trace & LLM Metadata</h4>
+                      <pre className="json-output">
+                        {JSON.stringify(
+                          result.audit_record.execution_trace,
+                          null,
+                          2,
+                        )}
+                      </pre>
+
+                      <h4>Recorded Recommendation</h4>
+                      <pre className="json-output">
+                        {JSON.stringify(
+                          result.audit_record.final_recommendation,
+                          null,
+                          2,
+                        )}
+                      </pre>
+
+                      <h4>Recorded Agent Outputs</h4>
+                      <pre className="json-output">
+                        {JSON.stringify(
+                          result.audit_record.agent_outputs,
+                          null,
+                          2,
+                        )}
+                      </pre>
+
+                      <h4>Complete Audit Record · Raw JSON</h4>
+                      <pre className="json-output">
+                        {JSON.stringify(result.audit_record, null, 2)}
+                      </pre>
+                    </>
+                  )}
+
+                  {result.audit_record?.errors &&
+                    result.audit_record.errors.length > 0 && (
+                      <>
+                        <h4>Recorded Execution Errors</h4>
+                        <pre className="json-output">
+                          {JSON.stringify(
+                            result.audit_record.errors,
+                            null,
+                            2,
+                          )}
+                        </pre>
+                      </>
+                    )}
+                </section>
+              </div>
+            </details>
+          </>
+        )}
+
+        {!result && !loading && !error && (
+          <div className="empty-state">
+            <div className="empty-icon">↗</div>
+            <h3>Ready to evaluate leads</h3>
+            <p>
+              Select a scenario and run prioritization to explore the lead information,
+              business recommendation, supporting evidence and suggested next action.
+            </p>
+          </div>
+        )}
+      </section>
+
+      <footer className="footer">
+        <span>AA007 · Lead Follow-up Prioritization Intelligence</span>
+        <span>Transparent rules · Explainable decisions</span>
+      </footer>
+    </main>
+  )
+}
+
+export default App
+</file>
+
+<file path="docs/architecture.md">
+# APEX — Lead Follow-up Prioritization Intelligence
+
+**Case ID:** AA007  
+**Product:** APEX — Lead Intelligence Platform
+**Domain:** Sales Operations
+**Architecture Version:** 3.2
+**Current Phase:** Phase 3 — Final Demo & Portfolio Package
+
+## 1. Architecture Overview
+
+APEX follows a deterministic, multi-agent workflow architecture orchestrated using LangGraph.
+
+The application accepts structured lead information through a FastAPI backend. A compiled LangGraph `StateGraph` coordinates lead validation, analytical agent execution, conditional business routing, explanation generation, and audit recording.
+
+Five specialized agents perform the lead evaluation:
+
+1. Lead Intake Agent
+2. Recency Agent
+3. Engagement Agent
+4. Fit & SLA Agent
+5. Lead Priority Decision Agent
+
+The workflow uses structured, run-scoped state to carry information between agents and workflow nodes.
+
+The final recommendation is produced by deterministic business rules and scoring. An optional Google Gemini integration enhances explanation readability but cannot modify the recommendation, priority score, or business rules.
+
+The React and TypeScript frontend presents the business recommendation separately from the technical execution details. The Explainability & Audit section provides access to the workflow context, agent outputs, execution trace, Gemini metadata, and audit record.
+
+The architecture maintains three clear responsibilities:
+
+- **Decision layer:** Deterministic validation, scoring, and recommendation.
+- **Orchestration layer:** LangGraph workflow execution and conditional routing.
+- **Presentation layer:** Business-facing recommendation and technical explainability.
+
+## 2. High-Level Architecture
+
+```text
+                 User
+                  |
+                  v
+          React + TypeScript
+             Frontend
+                  |
+                  v
+          Nginx API Proxy
+                  |
+                  v
+             FastAPI
+              Backend
+                  |
+                  v
+         LangGraph StateGraph
+                  |
+                  v
+           build_context
+                  |
+                  v
+            lead_intake
+                  |
+                  v
+            Intake Router
+                  |
+          +-------+--------+
+          |       |        |
+          v       v        v
+       recency  request_  workflow_
+          |      data      error
+          v
+      engagement
+          |
+          v
+        fit_sla
+          |
+          v
+   priority_decision
+          |
+          v
+     Priority Router
+          |
+    +-----+------+-------+-------+
+    |     |      |       |       |
+    v     v      v       v       v
+ overdue high  follow_ nurture workflow_
+ follow  priority up_soon         error
+    |     |      |       |       |
+    +-----+------+-------+-------+
+                  |
+                  v
+          build_explanation
+                  |
+                  v
+          gemini_explanation
+          (controlled optional
+             enhancement)
+                  |
+                  v
+          explanation_audit
+                  |
+                  v
+                 END
+                  |
+                  v
+            API Response
+                  |
+                  v
+             Frontend
+             /       \
+            v         v
+       Business     Explainability
+       Recommendation  & Audit
+```
+
+## 3. Agent Responsibilities
+
+### 3.1 Lead Intake Agent
+
+- Validates mandatory lead information.
+- Normalizes lead fields.
+- Identifies missing or invalid information.
+- Produces validated lead data.
+- Determines whether the lead can proceed through analytical evaluation.
+
+Missing mandatory information results in the `REQUEST_DATA` path.
+
+### 3.2 Recency Agent
+
+- Evaluates lead age and last-contact date.
+- Applies configured recency scoring bands.
+- Produces a recency score and supporting evidence.
+
+### 3.3 Engagement Agent
+
+- Evaluates approved business engagement events.
+- Applies configured event weights.
+- Produces an engagement score and supporting evidence.
+
+### 3.4 Fit & SLA Agent
+
+- Evaluates declared business need.
+- Checks pending follow-up commitments.
+- Identifies overdue follow-up conditions.
+- Produces fit and SLA outputs.
+
+### 3.5 Lead Priority Decision Agent
+
+- Combines the outputs from the analytical agents.
+- Applies deterministic decision precedence.
+- Produces the final recommendation, priority score, reasons, and triggered business rules.
+
+The five agents retain responsibility for validation, evidence evaluation, scoring, and business decisions. Neither LangGraph nor Gemini independently determines the business recommendation.
+
+## 4. LangGraph Workflow and Conditional Routing
+
+The backend invokes a compiled LangGraph `StateGraph`.
+
+The graph initializes a workflow context, executes lead intake, and uses conditional routers to select the appropriate business path.
+
+### 4.1 Intake Routing
+
+After the Lead Intake Agent executes, the intake router selects one of the following paths:
+
+| Condition | Selected route | Behaviour |
+|---|---|---|
+| Mandatory information is valid | `recency` | Continue through the analytical agents. |
+| Mandatory information is missing | `request_data` | Return a data-completion recommendation. |
+| Intake or workflow failure | `workflow_error` | Follow the workflow error path. |
+
+The missing-data path skips the four downstream analytical agents.
+
+### 4.2 Priority Routing
+
+Valid leads proceed through Recency, Engagement, and Fit & SLA before reaching the Lead Priority Decision Agent.
+
+The priority router selects the outcome path based on deterministic business rules.
+
+| Route | Triggering condition | Recommendation |
+|---|---|---|
+| `overdue_follow_up` | `OVERDUE_FOLLOW_UP` | `FOLLOW_UP_NOW` |
+| `high_priority` | `HIGH_PRIORITY_SCORE` | `FOLLOW_UP_NOW` |
+| `follow_up_soon` | `MODERATE_PRIORITY_SCORE` | `FOLLOW_UP_SOON` |
+| `nurture` | `LOW_PRIORITY_SCORE` | `NURTURE` |
+| `workflow_error` | Execution failure or unidentified route | Workflow error handling |
+
+Overdue follow-up takes precedence over the ordinary high-priority score route.
+
+### 4.3 Common Explanation and Audit Path
+
+All business outcome paths converge on the following nodes:
+
+1. `build_explanation`
+2. `gemini_explanation`
+3. `explanation_audit`
+
+The deterministic explanation is created first. The optional Gemini enhancement is then attempted. Finally, the audit stage records the completed workflow information.
+
+This common path ensures that successful decisions, incomplete-data outcomes, and workflow error outcomes follow the same explanation and audit sequence.
+
+## 5. Decision and Scoring Layer
+
+APEX uses deterministic scoring and explicit business rules.
+
+The current MVP uses the following provisional scoring allocation. These weights and scoring rules are implementation assumptions, not prescribed Product Bible values, and may be refined using validated operational data.
+
+| Component | Maximum points |
+|---|---:|
+| Recency | 30 |
+| Engagement | 40 |
+| Declared need / fit | 30 |
+| **Total** | **100** |
+
+The priority score is calculated by adding the three component scores and capping the result at 100:
+
+`Priority Score = min(Recency + Engagement + Fit, 100)`
+
+The current provisional scoring rules are:
+
+- **Recency:** 30 points for contact within 7 days, 20 points for 8–30 days, 10 points for 31–60 days, and 0 points beyond 60 days or when no contact date is available.
+- **Engagement:** Recognized engagement events contribute their configured event weights. The total engagement score is capped at 40.
+- **Fit:** A declared business need contributes 30 points; otherwise, the fit score is 0.
+
+### Decision precedence
+
+The Lead Priority Decision Agent applies the following rules in order:
+
+1. Missing or invalid mandatory lead information → `REQUEST_DATA`.
+2. Overdue committed follow-up → `FOLLOW_UP_NOW`.
+3. Priority score of 70 or higher → `FOLLOW_UP_NOW`.
+4. Priority score of 40–69 → `FOLLOW_UP_SOON`.
+5. Priority score below 40 → `NURTURE`.
+
+Missing mandatory information and overdue follow-up conditions take precedence over ordinary score-based decisions.
+
+These scoring bands, event weights, and thresholds are provisional MVP implementation assumptions. They are not prescribed Product Bible values.
+
+The decision layer combines the analytical results and applies business-rule precedence.
+
+Important conditions include:
+
+- Overdue committed follow-up can trigger `FOLLOW_UP_NOW`.
+- High fit combined with recent engagement supports higher priority.
+- Low engagement and older leads can be routed to `NURTURE`.
+- Missing mandatory information triggers `REQUEST_DATA`.
+
+The four recommendation outcomes are:
+
+| Recommendation | Business meaning |
+|---|---|
+| `FOLLOW_UP_NOW` | The lead needs prompt attention. |
+| `FOLLOW_UP_SOON` | The lead should remain in the active follow-up queue. |
+| `NURTURE` | The lead is better suited to continued engagement. |
+| `REQUEST_DATA` | Mandatory lead information must be completed before prioritization can continue. |
+
+The same valid input and configured rules produce the same deterministic result.
+
+The frontend does not calculate a replacement score or override the backend recommendation.
+
+## 6. Workflow State and Context
+
+Each workflow execution maintains its own shared workflow context.
+
+The context carries information between LangGraph nodes and agents, including:
+
+- Workflow identifier.
+- Original lead record.
+- Normalized lead snapshot.
+- Lead Intake validation outcome.
+- Validated lead information, when valid.
+- Recency score.
+- Engagement score.
+- Fit score and SLA flags.
+- Individual agent outputs.
+- Final recommendation.
+- Explanation.
+- Audit reference.
+- Errors.
+- Execution trace.
+
+The LangGraph state passes the lead record, engagement events, and workflow context between nodes.
+
+The context is run-scoped. It is not a long-term lead memory or persistent customer profile store.
+
+### 6.1 Execution Trace
+
+The workflow records node execution information.
+
+Each trace entry includes:
+
+- `node` — workflow node name.
+- `status` — execution status.
+
+Router entries also include:
+
+- `route` — selected conditional route.
+- `condition` — triggering condition.
+
+The trace records the selected business path and the execution status of the workflow nodes.
+
+## 7. Explanation and Controlled Gemini Enhancement
+
+### 7.1 Deterministic Explanation
+
+The Explanation Service generates the original explanation from the workflow context.
+
+It uses the final recommendation, supporting reasons, available evidence, and executed-agent information.
+
+This deterministic explanation remains the authoritative fallback.
+
+### 7.2 Gemini Explanation Enhancement
+
+The optional `GeminiExplainer` service enhances the readability of the deterministic explanation after the business decision has been completed.
+
+The structured evidence supplied to Gemini includes:
+
+- Recommendation action.
+- Priority score.
+- Score breakdown.
+- Triggered business rules.
+- Supporting reasons.
+- Executed agents.
+
+The lead identifier is excluded from the external explanation request.
+
+### 7.3 Validation and Safeguards
+
+The Gemini response is validated before acceptance.
+
+The implementation requires:
+
+- A non-empty response.
+- A single-line explanation.
+- A maximum length of 500 characters.
+- Preservation of the exact recommendation action.
+- Preservation of the exact priority score.
+
+The prompt restricts the model to rewriting supplied evidence. It prohibits invented facts, unsupported predictions, promises, and changes to the deterministic decision.
+
+The following conditions trigger deterministic fallback:
+
+- Missing provider configuration.
+- Provider errors.
+- Request timeouts.
+- Invalid or unacceptable responses.
+
+If Gemini is unavailable, the original deterministic explanation is retained.
+
+### 7.4 Configuration
+
+The service reads configuration from environment variables:
+
+| Variable | Purpose |
+|---|---|
+| `LLM_PROVIDER` | Selects the configured provider. |
+| `GEMINI_API_KEY` | Authenticates requests to Google Gemini. |
+| `GEMINI_MODEL` | Specifies the Gemini model. |
+| `LLM_TIMEOUT` | Sets the request timeout in seconds. |
+
+The API key is maintained outside source control. It must not be committed to GitHub or included in documentation.
+
+Gemini is an optional explanation enhancement. It does not perform validation, scoring, recommendation selection, routing, or autonomous customer actions.
+
+## 8. Audit Service
+
+The Audit Service records information about workflow executions, including:
+
+- Workflow ID.
+- Audit reference.
+- Execution timestamp.
+- Agent execution sequence.
+- Agent outputs.
+- Triggered business rules.
+- Final recommendation.
+- Errors, where applicable.
+- Complete execution trace.
+- Gemini provider, model, status, and execution reason when available.
+
+The audit stage records the complete execution trace after the explanation and Gemini processing stages.
+
+This preserves the selected business paths, execution statuses, and explanation outcome for inspection.
+
+### 8.1 Storage Limitation
+
+Audit records are stored in process-local memory in the current MVP.
+
+They are not guaranteed to survive backend restarts or container replacement.
+
+Persistent database-backed audit storage is outside the current implementation scope.
+
+## 9. Frontend Architecture
+
+The frontend uses React and TypeScript.
+
+It communicates with the FastAPI backend through relative `/api/` request paths.
+
+### 9.1 Business-Facing Recommendation
+
+The normal application screen focuses on:
+
+- Lead information and engagement context.
+- Recommendation outcome.
+- Priority score and available score breakdown.
+- Recommendation explanation.
+- Supporting evidence and triggered rules.
+- Suggested next action.
+
+The interface retains the product's dark navy and gold visual design.
+
+### 9.2 Explainability & Audit
+
+Internal technical execution information is separated from the normal business-facing screen.
+
+The collapsed-by-default **Explainability & Audit** section provides access to:
+
+- Run-scoped workflow context.
+- Five-agent execution timeline.
+- Structured agent outputs.
+- LangGraph routing and execution trace.
+- Gemini provider and model information.
+- Gemini execution status and fallback reason.
+- Audit reference and complete audit record.
+- Relevant raw JSON for technical inspection.
+
+Expanding or collapsing this section changes only frontend presentation. It does not change workflow execution, API responses, or business decisions.
+
+### 9.3 Suggested Next Actions
+
+The frontend presents predefined guidance based on the final deterministic recommendation.
+
+These suggestions are intended for human sales users.
+
+They do not automatically contact leads, schedule activities, update CRM records, or perform external business actions.
+
+## 10. API and Service Integration
+
+The FastAPI backend exposes endpoints for lead prioritization, seeded scenarios, and health checks.
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/leads/prioritize` | POST | Prioritizes a supplied lead record. |
+| `/api/leads/scenarios` | GET | Lists available seeded scenarios. |
+| `/api/leads/scenarios/{scenario_name}/run` | POST | Executes a seeded scenario. |
+| `/api/assistant/health` | GET | Backend health check. |
+
+The seeded scenarios are:
+
+- `hot` — recent inquiry, high fit, overdue follow-up.
+- `warm` — moderate engagement and valid declared need.
+- `stale` — older lead with no recognized engagement.
+
+The incomplete-contact scenario is submitted as an incomplete lead record to demonstrate the `REQUEST_DATA` route.
+
+The API response includes the workflow identifier, lead identifier, recommendation, explanation, audit reference, workflow context, audit record, and errors where applicable.
+
+## 11. Docker Deployment Architecture
+
+The application is containerized using Docker and Docker Compose.
+
+### 11.1 Backend Container
+
+- Built from `backend/Dockerfile`.
+- Uses Python 3.11.
+- Runs FastAPI through Uvicorn.
+- Listens on port `8002` inside the container.
+- Provides the backend health endpoint at `/api/assistant/health`.
+
+### 11.2 Frontend Container
+
+- Built from `frontend/Dockerfile`.
+- Uses Node.js to generate the React production build.
+- Uses Nginx to serve static frontend files.
+- Listens on container port `80`.
+- Publishes the application on host port `8080`.
+
+### 11.3 Container Communication
+
+Docker Compose creates an internal network for the services.
+
+Nginx forwards `/api/` requests to:
+
+```text
+http://backend:8002
+```
+
+The frontend uses the backend service through the internal Docker network.
+
+### 11.4 Health Checks
+
+- Backend health is checked through `/api/assistant/health`.
+- Frontend health is checked through `/health`.
+- Docker Compose reports the container health status.
+
+The containerized deployment preserves the existing deterministic business workflow and agent responsibilities.
+
+## 12. Cloud Deployment — Render
+
+The application is deployed on Render using two independent Docker-based Web Services.
+
+### 12.1 Frontend
+
+- **Service:** `aa007-frontend`
+- **Public URL:** https://aa007-frontend.onrender.com
+- Built using `frontend/Dockerfile`.
+- Serves the React production build through Nginx.
+- Uses `BACKEND_URL` to identify the backend service.
+
+### 12.2 Backend
+
+- **Service:** `aa007-backend`
+- **Public URL:** https://aa007-backend.onrender.com
+- **Health endpoint:** `/api/assistant/health`
+- Built using `backend/Dockerfile`.
+- Runs FastAPI through Uvicorn on port `8002`.
+
+### 12.3 Cloud Request Flow
+
+1. The user opens the public frontend URL.
+2. Nginx serves the React application.
+3. The frontend sends same-origin requests under `/api/`.
+4. Nginx forwards the requests to the backend configured through `BACKEND_URL`.
+5. FastAPI executes the deterministic workflow.
+6. The backend returns the recommendation and workflow information.
+7. The frontend presents the business recommendation and technical details.
+
+The frontend environment variable is configured as:
+
+```text
+BACKEND_URL=https://aa007-backend.onrender.com
+```
+
+The backend's optional Gemini configuration is maintained separately through backend environment variables.
+
+### 12.4 Cloud Deployment Constraints
+
+- Both services use the Render Free instance type.
+- Free services may spin down after inactivity, causing a delay on the first request.
+- Audit records are stored in process-local memory.
+- Records may be lost when the backend restarts or is replaced.
+- No persistent database or external audit storage is configured.
+
+## 13. Technology Stack
+
+| Layer | Technology |
+|---|---|
+| Backend | Python 3.11, FastAPI |
+| Data validation | Pydantic |
+| Workflow orchestration | LangGraph StateGraph |
+| LLM explanation | Google Gemini, `google-genai` SDK |
+| Frontend | React, TypeScript |
+| Frontend tooling | Vite |
+| Web server and proxy | Nginx |
+| Testing | Pytest |
+| Containerization | Docker, Docker Compose |
+| Cloud deployment | Render |
+
+## 14. Testing and Validation
+
+### 14.1 Backend Automated Tests
+
+The backend test suite was executed using the project's Python 3.11.9 virtual environment.
+
+**Latest verified result:**
+
+```text
+17 passed in 1.53s
+```
+
+The test suite includes:
+
+- Seed scenario workflow execution.
+- Scenario listing and execution APIs.
+- Unknown scenario handling.
+- Missing mandatory contact information.
+- High-priority conditional routing.
+- Gemini successful explanation.
+- Gemini provider-error fallback.
+- Gemini timeout fallback.
+- Invalid-response fallback.
+- Missing-configuration fallback.
+- Exclusion of lead identifiers from the Gemini prompt.
+- Preservation of the `REQUEST_DATA` recommendation.
+
+These tests verify the Gemini integration's success and fallback behavior through the automated test setup. They do not establish that a live Gemini request succeeds in every deployment.
+
+### 14.2 Application Scenario Validation
+
+The following four scenarios were manually verified:
+
+| Scenario | Expected recommendation | Validation |
+|---|---|---|
+| HOT lead | `FOLLOW_UP_NOW` | Passed |
+| WARM lead | `FOLLOW_UP_SOON` | Passed |
+| STALE lead | `NURTURE` | Passed |
+| Missing contact information | `REQUEST_DATA` | Passed |
+
+The missing-contact scenario correctly follows the mandatory-data validation route and skips the downstream analytical agents.
+
+### 14.3 Frontend Validation
+
+The frontend was validated through:
+
+- TypeScript compilation.
+- Production build.
+- Docker frontend image build.
+- Local Docker Compose startup.
+- Business-facing recommendation presentation.
+- Explainability & Audit expansion.
+- Responsive layout checks at 1440px, 768px, 390px, and 320px.
+
+### 14.4 Render Validation
+
+The deployed application was verified through:
+
+- Backend scenario API response.
+- Frontend Nginx proxy response.
+- Correct `BACKEND_URL` configuration.
+- Dashboard loading.
+- Execution of all four application scenarios.
+
+The deployed frontend and backend are available at the Render URLs documented in Section 12.
+
+## 15. Product Evolution
+
+The architecture evolved through three implementation stages.
+
+### Stage 1 — Deterministic Foundation
+
+The initial implementation established:
+
+- Structured lead inputs.
+- Five specialized agent responsibilities.
+- Deterministic scoring and business rules.
+- Four recommendation outcomes.
+- Evidence-based explanations and audit information.
+
+### Stage 2 — LangGraph Conditional Orchestration
+
+LangGraph introduced:
+
+- Shared workflow state.
+- Explicit workflow nodes.
+- Conditional intake routing.
+- Conditional priority routing.
+- Execution trace and selected route information.
+
+The business decision authority remained with the deterministic agents and rules.
+
+### Stage 3 — Controlled LLM Explanation and Productization
+
+The subsequent implementation introduced:
+
+- Optional Gemini explanation enhancement.
+- Response validation and deterministic fallback.
+- Explanation audit metadata.
+- A business-facing recommendation experience.
+- A separate Explainability & Audit section.
+
+Gemini remains restricted to explanation readability. The deterministic decision engine remains the source of truth.
+
+## 16. Limitations and Non-Goals
+
+APEX is an internship MVP and demonstration application.
+
+It is not intended to:
+
+- Autonomously contact customers.
+- Negotiate pricing or contracts.
+- Use sensitive demographic characteristics for prioritization.
+- Replace human sales judgment.
+- Guarantee AI explanation accuracy.
+- Claim production readiness or enterprise integration.
+
+The current implementation does not include:
+
+- Live CRM integration.
+- Automatic CRM updates.
+- Automatic follow-up scheduling.
+- Persistent database-backed audit storage.
+- Retrieval-Augmented Generation.
+- Vector databases.
+- Model Context Protocol integrations.
+- Autonomous external business actions.
+
+Future production use would require appropriate data governance, access controls, persistent storage, operational monitoring, and integration validation.
+
+## 17. Architecture Objective
+
+APEX combines deterministic multi-agent decision-making, LangGraph conditional orchestration, controlled LLM explanation enhancement, and a business-oriented frontend.
+
+The architecture preserves a clear separation between:
+
+- Deterministic business decisions.
+- Workflow orchestration and shared state.
+- Optional explanation enhancement.
+- Audit recording.
+- Business-facing presentation.
+- Technical workflow inspection.
+
+This design provides explainable lead follow-up prioritization while keeping business authority deterministic and the complete execution journey available for review.
+</file>
+
+<file path="README.md">
+# APEX — Lead Follow-up Prioritization Intelligence
+
+**Case ID:** AA007  
+**Product:** APEX — Lead Intelligence Platform  
+**Domain:** Sales Operations
+**Version:** 1.0.0
+**Phase:** 3 — Final Demo & Portfolio Package
+
+## 1. Overview
+
+APEX is a deterministic, multi-agent lead prioritization application designed to help sales teams decide which leads require attention first.
+
+It evaluates lead information, contact recency, engagement activity, declared business needs, and pending follow-up actions. It produces an explainable recommendation supported by scores, rules, and evidence.
+
+The application combines deterministic decision-making with LangGraph conditional workflow orchestration and an optional Gemini-powered explanation layer.
+
+**The deterministic workflow remains the authority for every lead recommendation. Gemini can improve the wording of an explanation, but it cannot change the recommendation or its score.**
+
+## 2. Business Problem
+
+Sales teams may receive leads from multiple sources, with different levels of engagement, contact history, and follow-up urgency.
+
+Without a consistent prioritization process:
+- Important follow-ups may be delayed.
+- Sales representatives may prioritize leads inconsistently.
+- Decisions may be difficult to explain or audit.
+- Incomplete lead information may result in unreliable decisions.
+
+APEX addresses this problem through structured lead evaluation and evidence-based prioritization.
+
+## 3. Primary Users
+
+- **Sales coordinators:** Identify leads requiring follow-up.
+- **Inside sales representatives:** Understand which leads to contact first and why.
+- **Sales operations leads:** Review prioritization decisions and workflow evidence.
+
+## 4. What the Product Does
+
+The application accepts structured lead information, evaluates it through multiple agents, and returns one of four recommendations:
+
+| Recommendation | Meaning |
+|---|---|
+| `FOLLOW_UP_NOW` | Immediate follow-up is required. |
+| `FOLLOW_UP_SOON` | Follow-up should happen soon. |
+| `NURTURE` | Keep the lead in a longer-term engagement process. |
+| `REQUEST_DATA` | Mandatory information is missing and must be supplied. |
+
+Each result includes a priority score, recommendation, reasons, evidence, and workflow/audit information.
+
+## 5. Architecture
+
+APEX uses a multi-agent workflow orchestrated through LangGraph.
+
+### Agent responsibilities
+
+1. **Lead Intake Agent** — Validates and normalizes lead information.
+2. **Recency Agent** — Evaluates lead age and last-contact recency.
+3. **Engagement Agent** — Evaluates recognized engagement events.
+4. **Fit & SLA Agent** — Evaluates declared business need and pending follow-up obligations.
+5. **Lead Priority Decision Agent** — Combines the deterministic scoring results and applies decision rules to produce the recommendation.
+
+### Workflow orchestration
+
+LangGraph coordinates the agents and conditional decision routes.
+
+The workflow includes:
+- Structured workflow state.
+- Sequential agent execution.
+- Conditional routing for different recommendation paths.
+- Explanation generation.
+- Optional Gemini explanation processing.
+- Explanation audit recording.
+
+The workflow ends after the explanation and audit stages.
+
+### Decision authority
+
+The decision engine is deterministic. It uses approved lead evidence, weighted scoring, and explicit business rules.
+
+Important decision conditions include:
+- Overdue committed follow-up can trigger `FOLLOW_UP_NOW`.
+- High fit combined with recent engagement supports higher priority.
+- Low engagement and older leads can be routed to `NURTURE`.
+- Missing mandatory information triggers `REQUEST_DATA`.
+
+The same valid input and rules produce the same deterministic decision.
+
+## 6. Key Features
+
+- Multi-agent lead evaluation.
+- Deterministic weighted scoring.
+- SLA-aware follow-up prioritization.
+- LangGraph conditional workflow routing.
+- Four recommendation outcomes.
+- Evidence-grounded explanations.
+- Optional Gemini explanation enhancement.
+- Deterministic fallback when Gemini is unavailable or returns an invalid response.
+- Workflow trace and audit information.
+- Business-facing recommendation view separated from technical explainability details.
+- Responsive frontend interface.
+
+## 7. Controlled Gemini Explanation Layer
+
+Gemini is an optional explanation enhancement, not a decision-making agent.
+
+The deterministic workflow first produces the recommendation and evidence. The Gemini layer receives approved decision evidence and attempts to rewrite the explanation concisely.
+
+The integration includes safeguards:
+- The recommendation and score must remain unchanged.
+- The explanation must be based on supplied evidence.
+- Lead identifiers are excluded from the Gemini evidence payload.
+- Unsupported predictions, promises, and claims are prohibited.
+- Invalid responses, provider errors, timeouts, or missing configuration trigger deterministic fallback.
+
+If Gemini is unavailable, the application retains the original deterministic explanation.
+
+## 8. Demo Scenarios
+
+The following scenarios demonstrate the application's decision paths.
+
+| Scenario | Input condition | Expected recommendation |
+|---|---|---|
+| A — Hot lead | Recent inquiry, strong fit, overdue follow-up | `FOLLOW_UP_NOW` |
+| B — Warm lead | Moderate engagement and valid declared need | `FOLLOW_UP_SOON` |
+| C — Stale lead | Older lead with no recognized engagement | `NURTURE` |
+| D — Incomplete lead | Missing mandatory contact information | `REQUEST_DATA` |
+
+Scenarios A, B, and C are provided through the seeded scenario API. Scenario D demonstrates the missing-data route using an incomplete lead record.
+
+The actual score and explanation are generated by the workflow at execution time.
+
+## 9. Technology Stack
+
+| Layer | Technology |
+|---|---|
+| Backend | Python, FastAPI |
+| Workflow orchestration | LangGraph |
+| LLM explanation | Google Gemini API, `google-genai` SDK |
+| Frontend | React, TypeScript, Vite |
+| Web server / reverse proxy | Nginx |
+| Testing | Pytest |
+| Containerization | Docker, Docker Compose |
+| Cloud deployment | Render |
+
+## 10. Running Locally
+
+### Prerequisites
+
+- Python 3.11
+- Node.js and npm
+- Docker and Docker Compose (for containerized execution)
+
+### Backend
+
+From the repository root:
+
+```bash
+cd backend
+```
+
+Create and activate a virtual environment if one does not already exist.
+
+Install the backend dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Start the API:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8002
+```
+
+### Frontend
+
+Open another terminal from the repository root:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The Vite development server uses the frontend development configuration to proxy API requests to the local backend.
+
+### Docker Compose
+
+From the repository root:
+
+```bash
+docker compose up --build
+```
+
+The containerized frontend is served on port `8080`. The backend is exposed on port `8002`.
+
+Use the application URL:
+
+```text
+http://localhost:8080
+```
+
+## 11. Cloud Deployment
+
+The application is deployed using Render.
+
+**Frontend:**
+https://aa007-frontend.onrender.com
+
+**Backend:**
+https://aa007-backend.onrender.com
+
+The frontend uses Nginx to forward `/api/` requests to the backend through the `BACKEND_URL` environment variable.
+
+The deployed configuration was verified:
+- Backend scenario API responds successfully.
+- Frontend proxy forwards requests successfully.
+- The deployed dashboard loads and works.
+- All four application scenarios were verified.
+
+## 12. Testing and Validation
+
+Backend automated tests were executed using the project's Python 3.11.9 virtual environment.
+
+**Latest verified result:**
+
+```text
+17 passed in 1.53s
+```
+
+Test coverage includes:
+- Seed scenario workflow execution.
+- Scenario listing and execution APIs.
+- Unknown scenario handling.
+- Missing mandatory contact information.
+- High-priority conditional routing.
+- Gemini successful explanation.
+- Gemini provider-error fallback.
+- Gemini timeout fallback.
+- Invalid-response fallback.
+- Missing-configuration fallback.
+- Exclusion of lead identifiers from the Gemini prompt.
+- Preservation of the `REQUEST_DATA` recommendation.
+
+The deployed frontend, backend API, and frontend-to-backend proxy were also manually verified.
+
+## 13. Product Evolution
+
+The project evolved through three main implementation stages:
+
+1. **Deterministic foundation:** Structured lead inputs, agent responsibilities, weighted scoring, business rules, and explainable recommendations.
+2. **LangGraph orchestration:** Multi-agent workflow execution, shared workflow state, and conditional routing for different decision paths.
+3. **Controlled LLM enhancement:** Optional Gemini-generated explanation wording, validation safeguards, and deterministic fallback.
+
+Across these stages, the deterministic decision engine remains the source of truth.
+
+## 14. Limitations and Non-Goals
+
+APEX is an internship MVP and demonstration application.
+
+It is not intended to:
+- Autonomously contact customers.
+- Negotiate pricing or contracts.
+- Make decisions using sensitive demographic characteristics.
+- Replace human sales judgment.
+- Guarantee AI explanation accuracy.
+- Claim production readiness or enterprise integration.
+
+The application uses structured sample scenarios for demonstration. Real-world deployment would require appropriate data governance, security controls, operational monitoring, and integration validation.
+
+## 15. Future Improvements
+
+Potential future improvements include:
+- Integration with approved CRM systems.
+- Persistent audit storage.
+- Expanded lead datasets and evaluation.
+- User authentication and role-based access.
+- Operational monitoring and workflow performance metrics.
+- Additional configurable sales prioritization rules.
+
+## 16. Repository
+
+GitHub:
+https://github.com/parvathycr28/AA007-Lead-Follow-up-Intelligence
+
+---
+
+**AA007 — APEX Lead Intelligence Platform**
+
+An explainable, deterministic-first, multi-agent approach to lead follow-up prioritization.
+</file>
+
+</files>
